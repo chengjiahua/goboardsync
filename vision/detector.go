@@ -3,6 +3,7 @@ package vision
 import (
 	"fmt"
 	"image"
+	"image/color"
 	"math"
 	"my-app/board"
 	"sort"
@@ -17,11 +18,11 @@ const (
 )
 
 type Detector struct {
-	BoardModel *board.Board
-	LastState  [19][19]float64
-	Threshold  float64
-	HGrid      []int // 19 条水平线坐标
-	VGrid      []int // 19 条垂直线坐标
+	BoardModel    *board.Board
+	LastBoardState [19][19]int // 存储上一次识别的 19x19 状态
+	Threshold     float64
+	HGrid         []int // 19 条水平线坐标
+	VGrid         []int // 19 条垂直线坐标
 }
 
 func NewDetector(b *board.Board) *Detector {
@@ -43,108 +44,79 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 		return -1, -1, ColorNone, "未知"
 	}
 
-	// 1. 确定 ROI
-	var boardRect image.Rectangle
-	if len(d.HGrid) == 19 && len(d.VGrid) == 19 {
-		// 使用检测到的网格线作为 ROI 基础，稍微向外扩展一点
-		boardRect = image.Rect(d.VGrid[0]-20, d.HGrid[0]-20, d.VGrid[18]+20, d.HGrid[18]+20)
-	} else {
-		// 回退到 BoardModel
-		boardRect = image.Rect(d.BoardModel.TopLeft.X-10, d.BoardModel.TopLeft.Y-10, d.BoardModel.BottomRight.X+10, d.BoardModel.BottomRight.Y+10)
+	// 1. 确保有网格线
+	if len(d.HGrid) != 19 || len(d.VGrid) != 19 {
+		h, v, err := d.AutoCalibrateBoard(img)
+		if err != nil {
+			return -1, -1, ColorNone, "校准失败"
+		}
+		d.HGrid = h
+		d.VGrid = v
 	}
 
-	if boardRect.Min.X < 0 {
-		boardRect.Min.X = 0
-	}
-	if boardRect.Min.Y < 0 {
-		boardRect.Min.Y = 0
-	}
-	if boardRect.Max.X > img.Cols() {
-		boardRect.Max.X = img.Cols()
-	}
-	if boardRect.Max.Y > img.Rows() {
-		boardRect.Max.Y = img.Rows()
-	}
-
-	roiImg := img.Region(boardRect)
-	defer roiImg.Close()
-
-	// 2. 预处理
-	gray := gocv.NewMat()
-	defer gray.Close()
-	gocv.CvtColor(roiImg, &gray, gocv.ColorBGRToGray)
-
-	blurred := gocv.NewMat()
-	defer blurred.Close()
-	gocv.GaussianBlur(gray, &blurred, image.Point{X: 9, Y: 9}, 2, 2, gocv.BorderDefault)
-
-	// 3. 检测圆
-	circles := gocv.NewMat()
-	defer circles.Close()
-	gocv.HoughCirclesWithParams(blurred, &circles, gocv.HoughGradient, 1, float64(roiImg.Rows()/25), 100, 38, 22, 45)
-
-	latestRow, latestCol, latestColor := -1, -1, ColorNone
+	// 2. 遍历 19x19 网格采样
+	var currentBoard [19][19]int
+	latestRow, latestCol := -1, -1
+	maxComplexity := 0.0
 	blackCount, whiteCount := 0, 0
-	maxStdDev := 0.0
 
-	for i := 0; i < circles.Cols(); i++ {
-		v := circles.GetVecfAt(0, i)
-		xRel, yRel := int(v[0]), int(v[1])
-		xAbs, yAbs := xRel+boardRect.Min.X, yRel+boardRect.Min.Y
+	for r := 0; r < 19; r++ {
+		for c := 0; c < 19; c++ {
+			p := image.Point{X: d.VGrid[c], Y: d.HGrid[r]}
+			color := d.AnalyzeStoneColor(img, p, r, c)
+			currentBoard[r][c] = color
 
-		// 映射坐标
-		var r, c int
-		if len(d.HGrid) == 19 && len(d.VGrid) == 19 {
-			r = findClosestIndex(yAbs, d.HGrid)
-			c = findClosestIndex(xAbs, d.VGrid)
-		} else {
-			r, c = d.BoardModel.GetGoCoordinate(image.Point{X: xAbs, Y: yAbs})
+			if color == ColorBlack {
+				blackCount++
+			} else if color == ColorWhite {
+				whiteCount++
+			}
+
+			// 寻找新落点：状态变化且复杂度（标记）最高
+			if color != ColorNone && color != d.LastBoardState[r][c] {
+				complexity := d.CalculateCenterComplexity(img, p, color)
+				if complexity > maxComplexity {
+					maxComplexity = complexity
+					latestRow, latestCol = r, c
+				}
+			}
 		}
+	}
 
-		if r < 0 || r > 18 || c < 0 || c > 18 {
-			continue
+	// 如果没有通过复杂度找到（可能标记不明显），则取任意一个状态变化的棋子
+	if latestRow == -1 {
+		for r := 0; r < 19; r++ {
+			for c := 0; c < 19; c++ {
+				if currentBoard[r][c] != ColorNone && currentBoard[r][c] != d.LastBoardState[r][c] {
+					latestRow, latestCol = r, c
+					goto found
+				}
+			}
 		}
+	}
+found:
 
-		color := d.AnalyzeStoneColor(img, image.Point{X: xAbs, Y: yAbs})
-		if color == ColorBlack {
-			blackCount++
-		} else if color == ColorWhite {
-			whiteCount++
-		}
-
-		stdDev := d.CalculateCenterComplexity(img, image.Point{X: xAbs, Y: yAbs}, color)
-		if stdDev > maxStdDev && stdDev > 8.0 { // 稍微降低阈值
-			maxStdDev = stdDev
-			latestRow, latestCol, latestColor = r, c, color
-		}
+	// 更新状态
+	d.LastBoardState = currentBoard
+	color := ColorNone
+	if latestRow != -1 {
+		color = currentBoard[latestRow][latestCol]
 	}
 
 	handNumber := fmt.Sprintf("%d", blackCount+whiteCount)
-	return latestRow, latestCol, latestColor, handNumber
+	return latestRow, latestCol, color, handNumber
 }
 
-func findClosestIndex(val int, sortedList []int) int {
-	idx := sort.SearchInts(sortedList, val)
-	if idx == 0 {
-		return 0
-	}
-	if idx == len(sortedList) {
-		return len(sortedList) - 1
-	}
-	if val-sortedList[idx-1] < sortedList[idx]-val {
-		return idx - 1
-	}
-	return idx
-}
-
-// AutoCalibrateBoard 自动检测棋盘边界并返回 19x19 的网格线坐标
+// AutoCalibrateBoard 按照 img2sfg.py 逻辑重构：消除圆干扰 -> 标准霍夫直线 -> 补全网格
 func (d *Detector) AutoCalibrateBoard(img gocv.Mat) ([]int, []int, error) {
 	if img.Empty() {
 		return nil, nil, fmt.Errorf("图片为空")
 	}
 
-	// 1. 预处理：限制区域以避开 UI 干扰 (顶部和底部各留 20% 空间)
-	roiRect := image.Rect(0, int(float64(img.Rows())*0.2), img.Cols(), int(float64(img.Rows())*0.8))
+	// 1. 预处理：限制区域以避开顶部和底部 UI (保留中间 60% 区域)
+	roiY := int(float64(img.Rows()) * 0.2)
+	roiH := int(float64(img.Rows()) * 0.6)
+	roiRect := image.Rect(0, roiY, img.Cols(), roiY+roiH)
 	roiImg := img.Region(roiRect)
 	defer roiImg.Close()
 
@@ -160,134 +132,233 @@ func (d *Detector) AutoCalibrateBoard(img gocv.Mat) ([]int, []int, error) {
 	defer edges.Close()
 	gocv.Canny(blurred, &edges, 50, 150)
 
-	// 2. 概率霍夫直线检测
-	lines := gocv.NewMat()
-	defer lines.Close()
-	// 寻找长度至少为宽度的 50% 的线段
-	gocv.HoughLinesPWithParams(edges, &lines, 1, 3.14159/180, 80, float32(img.Cols())*0.5, 20)
+	// 2. 检测并消除圆（棋子）干扰
+	circles := gocv.NewMat()
+	defer circles.Close()
+	gocv.HoughCirclesWithParams(blurred, &circles, gocv.HoughGradient, 1, 15, 100, 30, 10, 35)
 
-	var hLines, vLines []int
-	for i := 0; i < lines.Rows(); i++ {
-		line := lines.GetVeciAt(i, 0)
-		x1, y1, x2, y2 := int(line[0]), int(line[1]), int(line[2]), int(line[3])
+	cleanEdges := edges.Clone()
+	defer cleanEdges.Close()
 
-		// 转换回原图坐标
-		y1 += roiRect.Min.Y
-		y2 += roiRect.Min.Y
-
-		if abs(y1-y2) < 10 { // 水平线
-			hLines = append(hLines, (y1+y2)/2)
-		}
-		if abs(x1-x2) < 10 { // 垂直线
-			vLines = append(vLines, (x1+x2)/2)
-		}
+	for i := 0; i < circles.Cols(); i++ {
+		v := circles.GetVecfAt(0, i)
+		cx, cy, r := int(v[0]), int(v[1]), int(v[2])
+		rr := r + 3
+		rect := image.Rect(cx-rr, cy-rr, cx+rr, cy+rr)
+		gocv.Rectangle(&cleanEdges, rect, color.RGBA{0, 0, 0, 0}, -1)
+		gocv.Circle(&cleanEdges, image.Point{X: cx, Y: cy}, 1, color.RGBA{255, 255, 255, 0}, -1)
 	}
 
-	// 3. 聚类并外推 19 条网格线
-	hGrid := extrapolateGridLines(hLines, 19)
-	vGrid := extrapolateGridLines(vLines, 19)
+	// 3. 标准霍夫直线检测 (HoughLines)
+	linesMat := gocv.NewMat()
+	defer linesMat.Close()
+	// 增加 threshold 到 100 以过滤杂波
+	gocv.HoughLines(cleanEdges, &linesMat, 1, math.Pi/180, 100)
 
-	if len(hGrid) < 19 || len(vGrid) < 19 {
-		return nil, nil, fmt.Errorf("未能重建 19x19 棋盘网格 (H:%d, V:%d)", len(hGrid), len(vGrid))
-	}
+	var hLines, vLines []float32
+	angleTolerance := float64(1.5 * math.Pi / 180.0) // 稍微放宽角度容差
 
-	return hGrid, vGrid, nil
-}
+	for i := 0; i < linesMat.Rows(); i++ {
+		line := linesMat.GetVecfAt(i, 0)
+		rho := line[0]
+		theta := float64(line[1])
 
-func extrapolateGridLines(lines []int, expectedCount int) []int {
-	if len(lines) < 2 {
-		return nil
-	}
-
-	sort.Ints(lines)
-
-	// 1. 聚类
-	var clusters []int
-	currentCluster := lines[0]
-	count := 1
-	for i := 1; i < len(lines); i++ {
-		if lines[i]-lines[i-1] < 10 {
-			currentCluster += lines[i]
-			count++
-		} else {
-			clusters = append(clusters, currentCluster/count)
-			currentCluster = lines[i]
-			count = 1
+		if math.Abs(theta-math.Pi/2) < angleTolerance {
+			// 水平线，映射回原图坐标
+			hLines = append(hLines, rho+float32(roiRect.Min.Y))
+		} else if theta < angleTolerance || math.Abs(theta-math.Pi) < angleTolerance {
+			// 垂直线
+			r := rho
+			if math.Abs(theta-math.Pi) < angleTolerance {
+				r = -rho
+			}
+			vLines = append(vLines, r)
 		}
 	}
-	clusters = append(clusters, currentCluster/count)
 
-	if len(clusters) < 5 { // 至少需要几条线来估算间距
-		return nil
-	}
+	// 4. 聚类合并极近的线条
+	hCentres := clusterLines(hLines, 10)
+	vCentres := clusterLines(vLines, 10)
 
-	// 2. 计算最常见的间距 (Mode of gaps)
-	var gaps []int
-	for i := 1; i < len(clusters); i++ {
-		gaps = append(gaps, clusters[i]-clusters[i-1])
-	}
-	sort.Ints(gaps)
+	// 5. 补全网格
+	hGrid := completeGrid(hCentres, 19)
+	vGrid := completeGrid(vCentres, 19)
 
-	// 取中间值作为预估间距
-	avgGap := gaps[len(gaps)/2]
-	if avgGap < 10 {
-		return nil
-	}
+	// 6. 利用圆心点对网格进行精细平移和缩放对齐 (全局优化)
+	if len(hGrid) == 19 && len(vGrid) == 19 && circles.Cols() > 1 {
+		bestHOffset, bestVOffset := float32(0), float32(0)
+		maxScore := -1.0
 
-	// 3. 寻找最长的连续等间距子集
-	// 这里简化处理：假设棋盘主体已被检测到，我们向两侧扩展直到满 19 条
-	// 寻找符合 avgGap 的最大簇
-	// 实际生产中可以使用更复杂的 RANSAC 算法
+		// 尝试微调偏移和缩放 (这里为了性能，先只做偏移微调)
+		for ho := float32(-10); ho <= 10; ho += 2 {
+			for vo := float32(-10); vo <= 10; vo += 2 {
+				score := 0.0
+				for i := 0; i < circles.Cols(); i++ {
+					vec := circles.GetVecfAt(0, i)
+					cx, cy := vec[0], vec[1]+float32(roiRect.Min.Y)
 
-	// 我们假设 clusters 中的线都是网格线，只是有缺失
-	// 找到起始线和终止线
-	minVal := clusters[0]
-	maxVal := clusters[len(clusters)-1]
-
-	totalSpan := maxVal - minVal
-	estimatedCount := int(math.Round(float64(totalSpan)/float64(avgGap))) + 1
-
-	if estimatedCount > expectedCount+2 {
-		// 线条太多，可能包含边框，尝试截断
-		// 暂时只取中间 19 条
-	}
-
-	// 重建完整的网格：根据平均间距和现有线的位置进行对齐
-	// 我们取最中间的一条线作为基准点
-	baseLine := clusters[len(clusters)/2]
-
-	var grid []int
-	// 寻找相对于 baseLine 的偏移量，使得尽可能多的现有线落在格点上
-	// 这里简化为：直接以最外围的 19 条线范围为准
-	// 修正逻辑：既然我们要 19 条线，我们就在 clusters 覆盖的范围内寻找最合理的 19 条
-
-	// 尝试寻找最左边的线（第 0 条）
-	// 我们知道 baseLine 是第 N 条线，则第 0 条线在 baseLine - N * avgGap
-	// 我们尝试不同的 N 来最大化匹配度
-	bestOffset := 0
-	maxMatches := 0
-
-	for n := 0; n < expectedCount; n++ {
-		startLine := baseLine - n*avgGap
-		matches := 0
-		for _, c := range clusters {
-			dist := abs(c - startLine)
-			if dist%avgGap < 5 || dist%avgGap > avgGap-5 {
-				matches++
+					// 计算到最近交点的距离
+					minDist := float64(1000)
+					for _, h := range hGrid {
+						for _, v := range vGrid {
+							d := math.Hypot(float64(cy-(h+ho)), float64(cx-(v+vo)))
+							if d < minDist {
+								minDist = d
+							}
+						}
+					}
+					if minDist < 15 {
+						score += 1.0 - minDist/15.0
+					}
+				}
+				if score > maxScore {
+					maxScore = score
+					bestHOffset = ho
+					bestVOffset = vo
+				}
 			}
 		}
-		if matches > maxMatches {
-			maxMatches = matches
-			bestOffset = startLine
+
+		// 应用最佳平移
+		for i := range hGrid {
+			hGrid[i] += bestHOffset
+		}
+		for i := range vGrid {
+			vGrid[i] += bestVOffset
 		}
 	}
 
-	for i := 0; i < expectedCount; i++ {
-		grid = append(grid, bestOffset+i*avgGap)
+	if len(hGrid) != 19 || len(vGrid) != 19 {
+		return nil, nil, fmt.Errorf("未能重建 19x19 网格 (H:%d, V:%d)", len(hGrid), len(vGrid))
 	}
 
-	return grid
+	// 转换回 int
+	hResult := make([]int, 19)
+	for i, v := range hGrid {
+		hResult[i] = int(math.Round(float64(v)))
+	}
+	vResult := make([]int, 19)
+	for i, v := range vGrid {
+		vResult[i] = int(math.Round(float64(v)))
+	}
+
+	return hResult, vResult, nil
 }
+
+func clusterLines(lines []float32, minSpacing float32) []float32 {
+	if len(lines) == 0 {
+		return nil
+	}
+	sort.Slice(lines, func(i, j int) bool { return lines[i] < lines[j] })
+
+	var clusters []float32
+	if len(lines) > 0 {
+		currentSum := lines[0]
+		count := 1
+		for i := 1; i < len(lines); i++ {
+			if lines[i]-lines[i-1] < minSpacing {
+				currentSum += lines[i]
+				count++
+			} else {
+				clusters = append(clusters, currentSum/float32(count))
+				currentSum = lines[i]
+				count = 1
+			}
+		}
+		clusters = append(clusters, currentSum/float32(count))
+	}
+	return clusters
+}
+
+func completeGrid(x []float32, expected int) []float32 {
+	if len(x) < 2 {
+		return nil
+	}
+
+	// 截断逻辑参考 truncate_grid
+	if len(x) == expected+2 {
+		x = x[1 : expected+1]
+	} else if len(x) == expected+1 {
+		x = x[:expected]
+	}
+
+	if len(x) == expected {
+		return x
+	}
+
+	// 计算间距
+	var spaces []float32
+	var minSpace float32 = 1000000
+	for i := 1; i < len(x); i++ {
+		s := x[i] - x[i-1]
+		spaces = append(spaces, s)
+		if s < minSpace {
+			minSpace = s
+		}
+	}
+
+	if minSpace < 5 {
+		return nil
+	}
+
+	// 估算平均间距 (取非大间距的均值)
+	var smallSpaces []float32
+	bound := minSpace * 1.6
+	for _, s := range spaces {
+		if s <= bound {
+			smallSpaces = append(smallSpaces, s)
+		}
+	}
+
+	var avgSpace float32
+	if len(smallSpaces) > 0 {
+		var sum float32
+		for _, s := range smallSpaces {
+			sum += s
+		}
+		avgSpace = sum / float32(len(smallSpaces))
+	} else {
+		avgSpace = minSpace
+	}
+
+	// 补全
+	var result []float32
+	result = append(result, x[0])
+	for i := 0; i < len(spaces); i++ {
+		s := spaces[i]
+		if s <= bound {
+			result = append(result, x[i+1])
+		} else {
+			m := int(math.Round(float64(s / avgSpace)))
+			for k := 1; k <= m; k++ {
+				result = append(result, x[i]+float32(k)*s/float32(m))
+			}
+		}
+	}
+
+	// 如果补全后还是不对，或者超了，尝试截取或按平均间距向外推（这里简单处理，只返回长度匹配的部分）
+	if len(result) > expected {
+		// 寻找最匹配的 19 条 (暂取中间)
+		start := (len(result) - expected) / 2
+		return result[start : start+expected]
+	}
+
+	// 如果不足 19 条，尝试向两侧延展
+	for len(result) < expected {
+		// 优先向后延展
+		last := result[len(result)-1]
+		result = append(result, last+avgSpace)
+		if len(result) == expected {
+			break
+		}
+		// 向前延展
+		first := result[0]
+		result = append([]float32{first - avgSpace}, result...)
+	}
+
+	return result
+}
+
 
 func abs(x int) int {
 	if x < 0 {
@@ -296,13 +367,13 @@ func abs(x int) int {
 	return x
 }
 
-// CalculateCenterComplexity 计算棋子中心的标准差以识别标记 (使用灰度图以消除颜色偏见)
+// CalculateCenterComplexity 计算棋子中心的复杂度，专门寻找腾讯围棋的红色最新落点标记
 func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, stoneColor int) float64 {
 	if stoneColor == ColorNone {
 		return 0
 	}
 
-	regionSize := 6
+	regionSize := 8
 	rect := image.Rect(center.X-regionSize, center.Y-regionSize, center.X+regionSize, center.Y+regionSize)
 	if rect.Min.X < 0 || rect.Min.Y < 0 || rect.Max.X > img.Cols() || rect.Max.Y > img.Rows() {
 		return 0
@@ -311,90 +382,105 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 	roi := img.Region(rect)
 	defer roi.Close()
 
-	// 转换为灰度图计算
+	// 1. 检测红色分量 (腾讯围棋最新落点通常有红色标记)
+	// BGR 格式，红色是 index 2
+	meanBGR := roi.Mean()
+	rVal := meanBGR.Val3
+	gVal := meanBGR.Val2
+	bVal := meanBGR.Val1
+
+	// 如果红色显著高于绿和蓝，则非常有可能是最新落点标记
+	redness := rVal - (gVal+bVal)/2.0
+	if redness > 20 {
+		return 1000.0 + redness // 给一个极大的基础分
+	}
+
+	// 2. 备选方案：计算灰度标准差 (寻找数字等标记)
 	grayROI := gocv.NewMat()
 	defer grayROI.Close()
 	gocv.CvtColor(roi, &grayROI, gocv.ColorBGRToGray)
 
-	mean := gocv.NewMat()
-	defer mean.Close()
-	stddev := gocv.NewMat()
-	defer stddev.Close()
-	gocv.MeanStdDev(grayROI, &mean, &stddev)
+	meanMat := gocv.NewMat()
+	defer meanMat.Close()
+	stddevMat := gocv.NewMat()
+	defer stddevMat.Close()
+	gocv.MeanStdDev(grayROI, &meanMat, &stddevMat)
 
-	return stddev.GetDoubleAt(0, 0)
+	return stddevMat.GetDoubleAt(0, 0)
 }
 
-// AnalyzeStoneColor 分析棋子颜色 (采样圆环区域以避开中心数字标记)
-func (d *Detector) AnalyzeStoneColor(img gocv.Mat, p image.Point) int {
-	// 定义内部和外部半径，形成一个圆环
-	innerR := 10
-	outerR := 18
-
-	// 采样多个点
-	var intensities []float64
-	for angle := 0.0; angle < 360.0; angle += 45.0 {
-		rad := angle * 3.14159 / 180.0
-		// 在内圆和外圆之间采样
-		for r := innerR; r <= outerR; r += 4 {
-			px := p.X + int(float64(r)*math.Cos(rad))
-			py := p.Y + int(float64(r)*math.Sin(rad))
-
-			if px >= 0 && py >= 0 && px < img.Cols() && py < img.Rows() {
-				bgr := img.GetVecbAt(py, px)
-				// BGR -> Gray
-				gray := 0.299*float64(bgr[2]) + 0.587*float64(bgr[1]) + 0.114*float64(bgr[0])
-				intensities = append(intensities, gray)
-			}
-		}
+// AnalyzeStoneColor 分析棋子颜色 (采样网格交叉点中心区域)
+func (d *Detector) AnalyzeStoneColor(img gocv.Mat, p image.Point, r, c int) int {
+	// 计算采样半径：网格间距的 1/3 (更集中于棋子中心，避开邻近棋子)
+	var hSpace, vSpace int
+	if r < 18 {
+		hSpace = d.HGrid[r+1] - d.HGrid[r]
+	} else {
+		hSpace = d.HGrid[r] - d.HGrid[r-1]
+	}
+	if c < 18 {
+		vSpace = d.VGrid[c+1] - d.VGrid[c]
+	} else {
+		vSpace = d.VGrid[c] - d.VGrid[c-1]
 	}
 
-	if len(intensities) == 0 {
+	size := int(math.Min(float64(hSpace), float64(vSpace)) / 3.0)
+	if size < 4 {
+		size = 4
+	}
+
+	rect := image.Rect(p.X-size/2, p.Y-size/2, p.X+size/2, p.Y+size/2)
+	// 边界检查
+	if rect.Min.X < 0 {
+		rect.Min.X = 0
+	}
+	if rect.Min.Y < 0 {
+		rect.Min.Y = 0
+	}
+	if rect.Max.X > img.Cols() {
+		rect.Max.X = img.Cols()
+	}
+	if rect.Max.Y > img.Rows() {
+		rect.Max.Y = img.Rows()
+	}
+
+	if rect.Empty() || rect.Dx() < 2 || rect.Dy() < 2 {
 		return ColorNone
-	}
-
-	// 计算平均亮度
-	sum := 0.0
-	for _, v := range intensities {
-		sum += v
-	}
-	avg := sum / float64(len(intensities))
-
-	// 真正的棋子在圆环区域应保持纯色
-	// 腾讯围棋：黑色棋子平均亮度较低，白色棋子极高
-	if avg < 80 {
-		return ColorBlack
-	} else if avg > 180 {
-		return ColorWhite
-	}
-	return ColorNone
-}
-
-// HasMarker 检查棋子中心是否有标记（数字或圆圈导致的亮度/标准差突变）
-func (d *Detector) HasMarker(img gocv.Mat, center image.Point, stoneColor int) bool {
-	if stoneColor == ColorNone {
-		return false
-	}
-
-	regionSize := 6
-	rect := image.Rect(center.X-regionSize, center.Y-regionSize, center.X+regionSize, center.Y+regionSize)
-	if rect.Min.X < 0 || rect.Min.Y < 0 || rect.Max.X > img.Cols() || rect.Max.Y > img.Rows() {
-		return false
 	}
 
 	roi := img.Region(rect)
 	defer roi.Close()
 
-	// 计算标准差来检测文字/标记
-	mean := gocv.NewMat()
-	defer mean.Close()
-	stddev := gocv.NewMat()
-	defer stddev.Close()
-	gocv.MeanStdDev(roi, &mean, &stddev)
+	// 计算均值和标准差
+	meanMat := gocv.NewMat()
+	defer meanMat.Close()
+	stddevMat := gocv.NewMat()
+	defer stddevMat.Close()
+	gocv.MeanStdDev(roi, &meanMat, &stddevMat)
 
-	// 从 stddev Mat 中提取值 (假设是灰度或均值)
-	// 如果是彩色图，stddev 会有多个通道
-	s := stddev.GetDoubleAt(0, 0)
+	// 简单取 BGR 均值之和的平均作为亮度
+	avgBrightness := (meanMat.GetDoubleAt(0, 0) + meanMat.GetDoubleAt(1, 0) + meanMat.GetDoubleAt(2, 0)) / 3.0
 
-	return s > 25.0
+	// 棋子判断逻辑：
+	// 1. 颜色鲜艳度判断 (棋子应为灰色/黑/白，BGR 差异小)
+	b, g, rv := meanMat.GetDoubleAt(0, 0), meanMat.GetDoubleAt(1, 0), meanMat.GetDoubleAt(2, 0)
+	// 腾讯围棋背景色通常是 R:200+, G:150+, B:80+ (偏黄)
+	// 增加对背景色的过滤：如果 R > G > B 且差值显著，则为空位
+	if rv > g+10 && g > b+10 {
+		return ColorNone
+	}
+
+	isGray := math.Abs(b-g) < 20 && math.Abs(g-rv) < 20 && math.Abs(b-rv) < 20
+
+	if !isGray {
+		return ColorNone
+	}
+
+	// 2. 亮度阈值
+	if avgBrightness < 95 {
+		return ColorBlack
+	} else if avgBrightness > 175 {
+		return ColorWhite
+	}
+	return ColorNone
 }
