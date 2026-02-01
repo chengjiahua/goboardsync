@@ -18,11 +18,11 @@ const (
 )
 
 type Detector struct {
-	BoardModel    *board.Board
+	BoardModel     *board.Board
 	LastBoardState [19][19]int // 存储上一次识别的 19x19 状态
-	Threshold     float64
-	HGrid         []int // 19 条水平线坐标
-	VGrid         []int // 19 条垂直线坐标
+	Threshold      float64
+	HGrid          []int // 19 条水平线坐标
+	VGrid          []int // 19 条垂直线坐标
 }
 
 func NewDetector(b *board.Board) *Detector {
@@ -60,6 +60,13 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 	maxComplexity := 0.0
 	blackCount, whiteCount := 0, 0
 
+	// 存储所有可能的新落点
+	var possibleMoves []struct {
+		row, col   int
+		complexity float64
+		color      int
+	}
+
 	for r := 0; r < 19; r++ {
 		for c := 0; c < 19; c++ {
 			p := image.Point{X: d.VGrid[c], Y: d.HGrid[r]}
@@ -72,19 +79,40 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 				whiteCount++
 			}
 
-			// 寻找新落点：状态变化且复杂度（标记）最高
-			if color != ColorNone && color != d.LastBoardState[r][c] {
-				complexity := d.CalculateCenterComplexity(img, p, color)
-				if complexity > maxComplexity {
-					maxComplexity = complexity
-					latestRow, latestCol = r, c
+			// 计算每个点的复杂度，用于识别最新落点
+			complexity := d.CalculateCenterComplexity(img, p, color)
+
+			// 寻找可能的新落点
+			if color != ColorNone {
+				// 检查是否是状态变化
+				stateChanged := color != d.LastBoardState[r][c]
+
+				// 如果是新落点或有红色标记，添加到候选列表
+				if stateChanged || complexity > 50 {
+					possibleMoves = append(possibleMoves, struct {
+						row, col   int
+						complexity float64
+						color      int
+					}{r, c, complexity, color})
 				}
 			}
 		}
 	}
 
-	// 如果没有通过复杂度找到（可能标记不明显），则取任意一个状态变化的棋子
+	// 3. 从候选列表中选择最佳落点
+	if len(possibleMoves) > 0 {
+		// 按复杂度排序，选择最高的
+		for _, move := range possibleMoves {
+			if move.complexity > maxComplexity {
+				maxComplexity = move.complexity
+				latestRow, latestCol = move.row, move.col
+			}
+		}
+	}
+
+	// 4. 如果没有找到，尝试其他方法
 	if latestRow == -1 {
+		// 检查是否有状态变化的点
 		for r := 0; r < 19; r++ {
 			for c := 0; c < 19; c++ {
 				if currentBoard[r][c] != ColorNone && currentBoard[r][c] != d.LastBoardState[r][c] {
@@ -96,13 +124,14 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 	}
 found:
 
-	// 更新状态
+	// 5. 更新状态
 	d.LastBoardState = currentBoard
 	color := ColorNone
 	if latestRow != -1 {
 		color = currentBoard[latestRow][latestCol]
 	}
 
+	// 6. 计算手数：黑棋先手，所以手数 = 黑棋数 + 白棋数
 	handNumber := fmt.Sprintf("%d", blackCount+whiteCount)
 	return latestRow, latestCol, color, handNumber
 }
@@ -359,7 +388,6 @@ func completeGrid(x []float32, expected int) []float32 {
 	return result
 }
 
-
 func abs(x int) int {
 	if x < 0 {
 		return -x
@@ -373,7 +401,7 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 		return 0
 	}
 
-	regionSize := 8
+	regionSize := 10 // 增大区域大小以更好地捕捉红色标记
 	rect := image.Rect(center.X-regionSize, center.Y-regionSize, center.X+regionSize, center.Y+regionSize)
 	if rect.Min.X < 0 || rect.Min.Y < 0 || rect.Max.X > img.Cols() || rect.Max.Y > img.Rows() {
 		return 0
@@ -389,9 +417,11 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 	gVal := meanBGR.Val2
 	bVal := meanBGR.Val1
 
-	// 如果红色显著高于绿和蓝，则非常有可能是最新落点标记
+	// 增强红色检测：腾讯围棋的红色标记通常是鲜艳的红色
+	// 红色分量应该显著高于绿色和蓝色，并且整体亮度适中
 	redness := rVal - (gVal+bVal)/2.0
-	if redness > 20 {
+	// 增加红色阈值，同时确保不是过亮的白色区域
+	if redness > 30 && rVal > 100 && rVal < 250 {
 		return 1000.0 + redness // 给一个极大的基础分
 	}
 
@@ -470,16 +500,19 @@ func (d *Detector) AnalyzeStoneColor(img gocv.Mat, p image.Point, r, c int) int 
 		return ColorNone
 	}
 
-	isGray := math.Abs(b-g) < 20 && math.Abs(g-rv) < 20 && math.Abs(b-rv) < 20
-
-	if !isGray {
+	// 2. 改进的灰度判断：允许棋子有轻微的颜色偏差
+	maxRGB := math.Max(math.Max(b, g), rv)
+	minRGB := math.Min(math.Min(b, g), rv)
+	colorRange := maxRGB - minRGB
+	if colorRange > 30 {
 		return ColorNone
 	}
 
-	// 2. 亮度阈值
-	if avgBrightness < 95 {
+	// 3. 改进的亮度阈值判断
+	// 根据实际测试结果调整阈值
+	if avgBrightness < 100 {
 		return ColorBlack
-	} else if avgBrightness > 175 {
+	} else if avgBrightness > 160 {
 		return ColorWhite
 	}
 	return ColorNone
