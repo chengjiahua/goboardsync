@@ -105,14 +105,14 @@ func TestBatchRecognition(t *testing.T) {
 			actualColorStr = "white"
 		}
 
-		expectStr := fmt.Sprintf("%s-%s-%s", expectHand, expectGTP, expectColorStr)
+		expectStr := fmt.Sprintf("images/%s-%s-%s", expectHand, expectGTP, expectColorStr)
 		actualStr := fmt.Sprintf("%s-%s-%s", hand, actualGTP, actualColorStr)
 
 		isCorrect := hand == expectHand && actualGTP == expectGTP && actualColorStr == expectColorStr
 		status := "✅ 正确"
 		if !isCorrect {
 			status = "❌ 错误"
-			t.Logf("[%s] 识别错误: 预期 %s, 实际 %s (尺寸: %s)", name, expectStr, actualStr, imgSize)
+			// t.Logf("[%s] 识别错误: 预期 %s, 实际 %s (尺寸: %s)", name, expectStr, actualStr, imgSize)
 		} else {
 			successCount++
 		}
