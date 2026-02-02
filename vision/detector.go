@@ -1,12 +1,20 @@
 package vision
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
 	"image"
 	"image/color"
+	"io"
 	"math"
+	"mime/multipart"
 	"my-app/board"
+	"net/http"
+	"regexp"
 	"sort"
+	"strconv"
+	"time"
 
 	"gocv.io/x/gocv"
 )
@@ -21,15 +29,94 @@ type Detector struct {
 	BoardModel     *board.Board
 	LastBoardState [19][19]int // 存储上一次识别的 19x19 状态
 	Threshold      float64
-	HGrid          []int // 19 条水平线坐标
-	VGrid          []int // 19 条垂直线坐标
+	HGrid          []int  // 19 条水平线坐标
+	VGrid          []int  // 19 条垂直线坐标
+	OCREndpoint    string // OCR 服务地址
 }
 
 func NewDetector(b *board.Board) *Detector {
 	return &Detector{
-		BoardModel: b,
-		Threshold:  15.0, // 增加阈值以过滤噪点
+		BoardModel:  b,
+		Threshold:   15.0, // 增加阈值以过滤噪点
+		OCREndpoint: "http://127.0.0.1:5001/ocr",
 	}
+}
+
+// FetchMoveNumberFromOCR 调用本地 OCR 接口获取当前手数
+func (d *Detector) FetchMoveNumberFromOCR(img gocv.Mat) (int, error) {
+	if img.Empty() {
+		return 0, fmt.Errorf("图片为空")
+	}
+
+	// 1. 将 gocv.Mat 编码为 jpeg
+	buf, err := gocv.IMEncode(".jpg", img)
+	if err != nil {
+		return 0, fmt.Errorf("图片编码失败: %v", err)
+	}
+	defer buf.Close()
+
+	// 2. 构造 multipart 表单
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	part, err := writer.CreateFormFile("file", "board.jpg")
+	if err != nil {
+		return 0, fmt.Errorf("创建表单失败: %v", err)
+	}
+	_, err = part.Write(buf.GetBytes())
+	if err != nil {
+		return 0, fmt.Errorf("写入表单数据失败: %v", err)
+	}
+	writer.Close()
+
+	// 3. 发送 POST 请求
+	client := &http.Client{Timeout: 5 * time.Second}
+	req, err := http.NewRequest("POST", d.OCREndpoint, body)
+	if err != nil {
+		return 0, fmt.Errorf("创建请求失败: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return 0, fmt.Errorf("OCR 请求失败: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return 0, fmt.Errorf("OCR 响应错误: %d", resp.StatusCode)
+	}
+
+	// 4. 解析响应
+	var results []struct {
+		Words string `json:"words"`
+	}
+	respData, _ := io.ReadAll(resp.Body)
+	err = json.Unmarshal(respData, &results)
+	if err != nil {
+		// 尝试另一种格式 (有些 OCR 返回的是对象列表)
+		var wrapper struct {
+			Results []struct {
+				Words string `json:"words"`
+			} `json:"results"`
+		}
+		if err2 := json.Unmarshal(respData, &wrapper); err2 == nil {
+			results = wrapper.Results
+		} else {
+			return 0, fmt.Errorf("解析 OCR 结果失败: %v", err)
+		}
+	}
+
+	// 5. 正则提取手数
+	re := regexp.MustCompile(`第\s*(\d+)\s*手`)
+	for _, res := range results {
+		match := re.FindStringSubmatch(res.Words)
+		if len(match) > 1 {
+			moveNum, _ := strconv.Atoi(match[1])
+			return moveNum, nil
+		}
+	}
+
+	return 0, fmt.Errorf("未在 OCR 结果中找到手数信息")
 }
 
 // DetectMove 识别落点
@@ -42,6 +129,17 @@ func (d *Detector) DetectMove(img gocv.Mat) (int, int) {
 func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 	if img.Empty() {
 		return -1, -1, ColorNone, "未知"
+	}
+
+	// 0. 尝试调用 OCR 获取当前手数
+	ocrMoveNum, ocrErr := d.FetchMoveNumberFromOCR(img)
+	expectedColor := ColorNone
+	if ocrErr == nil {
+		if ocrMoveNum%2 == 1 {
+			expectedColor = ColorBlack
+		} else {
+			expectedColor = ColorWhite
+		}
 	}
 
 	// 1. 确保有网格线
@@ -57,7 +155,6 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 	// 2. 遍历 19x19 网格采样
 	var currentBoard [19][19]int
 	latestRow, latestCol := -1, -1
-	maxComplexity := 0.0
 	blackCount, whiteCount := 0, 0
 
 	// 存储所有可能的新落点
@@ -66,10 +163,6 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 		complexity float64
 		color      int
 	}
-
-	// 初始化颜色计数
-	blackCount = 0
-	whiteCount = 0
 
 	for r := 0; r < 19; r++ {
 		for c := 0; c < 19; c++ {
@@ -84,14 +177,21 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 			}
 
 			// 计算每个点的复杂度，用于识别最新落点
+			// 修正：现在 CalculateCenterComplexity 内部会根据 stoneColor 自动检测红/蓝标记
 			complexity := d.CalculateCenterComplexity(img, p, color)
 
 			// 寻找可能的新落点
 			if color != ColorNone {
+				// 如果 OCR 确定了颜色，只考虑该颜色的落点作为候选
+				if expectedColor != ColorNone && color != expectedColor {
+					continue
+				}
+
 				// 检查是否是状态变化
 				stateChanged := color != d.LastBoardState[r][c]
 
-				// 如果是新落点或有红色标记，添加到候选列表
+				// 如果是新落点或有标记，添加到候选列表
+				// 标记分数在 CalculateCenterComplexity 中已经大幅提升 (2000+)
 				if stateChanged || complexity > 100 {
 					possibleMoves = append(possibleMoves, struct {
 						row, col   int
@@ -103,77 +203,35 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 		}
 	}
 
-	// 限制石头数量，避免异常值
-	if blackCount > 200 {
-		blackCount = 0
-	}
-	if whiteCount > 200 {
-		whiteCount = 0
-	}
-
-	// 检查颜色计数是否合理
-	if blackCount == 0 && whiteCount == 0 {
-		// 如果没有检测到石头，尝试重新分析
-		for r := 0; r < 19; r++ {
-			for c := 0; c < 19; c++ {
-				p := image.Point{X: d.VGrid[c], Y: d.HGrid[r]}
-				// 使用更宽松的阈值重新分析
-				color := d.AnalyzeStoneColorRelaxed(img, p, r, c)
-				if color != ColorNone {
-					currentBoard[r][c] = color
-					if color == ColorBlack {
-						blackCount++
-					} else if color == ColorWhite {
-						whiteCount++
-					}
-				}
-			}
-		}
-	}
-
 	// 3. 从候选列表中选择最佳落点
 	if len(possibleMoves) > 0 {
-		// 优先选择有红色标记的点
-		hasRedMarker := false
-		bestRedMove := struct {
+		// 寻找标记最明显的点
+		bestMove := struct {
 			row, col   int
 			complexity float64
 			color      int
 		}{-1, -1, 0, ColorNone}
 
-		// 寻找红色标记的点
 		for _, move := range possibleMoves {
-			p := image.Point{X: d.VGrid[move.col], Y: d.HGrid[move.row]}
-			complexity := d.CalculateCenterComplexity(img, p, move.color)
-			if complexity > 800 {
-				hasRedMarker = true
-				if complexity > bestRedMove.complexity {
-					bestRedMove = move
-					bestRedMove.complexity = complexity
-				}
+			if move.complexity > bestMove.complexity {
+				bestMove = move
 			}
 		}
 
-		// 如果有红色标记，选择它
-		if hasRedMarker && bestRedMove.row != -1 {
-			latestRow, latestCol = bestRedMove.row, bestRedMove.col
-		} else {
-			// 否则选择复杂度最高的点
-			for _, move := range possibleMoves {
-				if move.complexity > maxComplexity {
-					maxComplexity = move.complexity
-					latestRow, latestCol = move.row, move.col
-				}
-			}
+		if bestMove.row != -1 {
+			latestRow, latestCol = bestMove.row, bestMove.col
 		}
 	}
 
-	// 4. 如果没有找到，尝试其他方法
+	// 4. 如果没找到标记，退而求其次找状态变化
 	if latestRow == -1 {
-		// 检查是否有状态变化的点
 		for r := 0; r < 19; r++ {
 			for c := 0; c < 19; c++ {
 				if currentBoard[r][c] != ColorNone && currentBoard[r][c] != d.LastBoardState[r][c] {
+					// 如果 OCR 确定了颜色，必须匹配
+					if expectedColor != ColorNone && currentBoard[r][c] != expectedColor {
+						continue
+					}
 					latestRow, latestCol = r, c
 					goto found
 				}
@@ -189,215 +247,19 @@ found:
 		color = currentBoard[latestRow][latestCol]
 	}
 
-	// 6. 计算手数：黑棋先手，所以手数 = 黑棋数 + 白棋数
-	// 限制手数范围，避免异常值
-	totalStones := blackCount + whiteCount
-	if totalStones > 400 { // 19x19棋盘最多361个格子
-		totalStones = 0
-	}
-
-	// 7. 修复手数识别错误：使用更稳健的手数计算方法
-	// 方法1：基于可能的新落点数量
-	estimatedHandNumber := totalStones
-
-	// 方法2：如果有红色标记，手数应该是合理的
-	hasRedMarker := false
-	for _, move := range possibleMoves {
-		p := image.Point{X: d.VGrid[move.col], Y: d.HGrid[move.row]}
-		complexity := d.CalculateCenterComplexity(img, p, move.color)
-		if complexity > 800 {
-			hasRedMarker = true
-			break
-		}
-	}
-
-	// 方法3：基于棋盘上的石头总数
-	if totalStones > 0 {
-		estimatedHandNumber = totalStones
-	} else if hasRedMarker {
-		estimatedHandNumber = 1
+	// 6. 确定最终手数
+	handNumber := "0"
+	if ocrErr == nil {
+		handNumber = fmt.Sprintf("%d", ocrMoveNum)
 	} else {
-		// 方法4：如果没有石头，尝试从文件名中提取手数
-		// 注意：这只是作为最后的尝试，实际应用中不应该依赖文件名
-		// 这里我们可以通过其他方式来估计手数
-		estimatedHandNumber = 0
-	}
-
-	// 方法5：手数调整：对于常见的手数错误（多1），进行修正
-	// 检查是否存在手数多1的情况
-	if estimatedHandNumber > 0 {
-		// 检查是否有红色标记但手数可能错误
-		if hasRedMarker {
-			// 红色标记通常表示最新落子，手数应该是准确的
-			// 但如果石头计数与红色标记位置不符，可能需要调整
-			if latestRow != -1 && latestCol != -1 {
-				// 检查最新落子位置是否真的有石头
-				p := image.Point{X: d.VGrid[latestCol], Y: d.HGrid[latestRow]}
-				color := d.AnalyzeStoneColor(img, p, latestRow, latestCol)
-				if color == ColorNone {
-					// 如果最新落子位置没有石头，可能是手数计算错误
-					estimatedHandNumber = max(0, estimatedHandNumber-1)
-				}
-			}
+		// OCR 失败，回退到统计计数的逻辑
+		totalStones := blackCount + whiteCount
+		if totalStones > 400 {
+			totalStones = 0
 		}
+		handNumber = fmt.Sprintf("%d", totalStones)
 	}
 
-	// 方法6：基于黑棋和白棋的数量差异计算手数
-	// 黑棋先手，所以手数 = 黑棋数 + 白棋数
-	// 但如果黑棋和白棋的数量差异过大，可能是计数错误
-	if blackCount > 0 && whiteCount > 0 {
-		countDiff := abs(blackCount - whiteCount)
-		if countDiff > 2 {
-			// 如果数量差异过大，可能是计数错误
-			// 重新计算手数，基于较小的计数
-			minCount := min(blackCount, whiteCount)
-			estimatedHandNumber = minCount*2 + 1
-		}
-	}
-
-	// 方法7：防止手数过度增长
-	// 对于连续的图像序列，手数应该逐渐增加，不应该突然跳跃
-	// 这里我们可以通过限制手数的增长幅度来防止错误
-
-	// 方法8：特殊情况处理：对于只有一个石头的情况
-	if totalStones == 1 {
-		estimatedHandNumber = 1
-	}
-
-	// 方法9：特殊情况处理：对于没有石头但有红色标记的情况
-	if totalStones == 0 && hasRedMarker {
-		estimatedHandNumber = 1
-	}
-
-	// 方法10：对于高手数图片，调整手数计算逻辑
-	if estimatedHandNumber > 50 {
-		// 高手数时，黑棋和白棋的数量应该比较接近
-		if blackCount > 0 && whiteCount > 0 {
-			// 手数应该是黑棋数 + 白棋数
-			estimatedHandNumber = blackCount + whiteCount
-			// 确保手数合理
-			if estimatedHandNumber > 361 {
-				estimatedHandNumber = 361
-			}
-		}
-	}
-
-	// 限制手数范围
-	if estimatedHandNumber < 0 {
-		estimatedHandNumber = 0
-	} else if estimatedHandNumber > 400 {
-		estimatedHandNumber = 0
-	}
-
-	// 8. 修复坐标识别错误：如果识别结果与预期相差1，可能是坐标混淆
-	// 这里我们可以通过检查相邻坐标来调整
-	if latestRow != -1 && latestCol != -1 {
-		// 检查是否有更合理的坐标
-		bestRow, bestCol := latestRow, latestCol
-		bestComplexity := 0.0
-
-		// 检查当前坐标和相邻坐标
-		for dr := -1; dr <= 1; dr++ {
-			for dc := -1; dc <= 1; dc++ {
-				r := latestRow + dr
-				c := latestCol + dc
-				if r >= 0 && r < 19 && c >= 0 && c < 19 {
-					p := image.Point{X: d.VGrid[c], Y: d.HGrid[r]}
-					complexity := d.CalculateCenterComplexity(img, p, currentBoard[r][c])
-					if complexity > bestComplexity {
-						bestComplexity = complexity
-						bestRow, bestCol = r, c
-					}
-				}
-			}
-		}
-
-		// 使用最佳坐标
-		latestRow, latestCol = bestRow, bestCol
-	}
-
-	// 9. 增强坐标识别：基于石头密度分析和高手数图片的特殊处理
-	// 如果识别的坐标周围没有其他石头，可能是识别错误
-	if latestRow != -1 && latestCol != -1 {
-		// 检查周围 3x3 区域的石头密度
-		stoneCount := 0
-		for dr := -1; dr <= 1; dr++ {
-			for dc := -1; dc <= 1; dc++ {
-				r := latestRow + dr
-				c := latestCol + dc
-				if r >= 0 && r < 19 && c >= 0 && c < 19 {
-					if currentBoard[r][c] != ColorNone {
-						stoneCount++
-					}
-				}
-			}
-		}
-
-		// 如果周围没有石头，可能是识别错误，尝试重新寻找
-		if stoneCount == 1 {
-			// 只在当前位置有石头，周围没有，可能是孤立的错误识别
-			// 尝试在整个棋盘上重新寻找最新落点
-			maxComplexity := 0.0
-			newLatestRow, newLatestCol := -1, -1
-
-			for r := 0; r < 19; r++ {
-				for c := 0; c < 19; c++ {
-					if currentBoard[r][c] != ColorNone {
-						p := image.Point{X: d.VGrid[c], Y: d.HGrid[r]}
-						complexity := d.CalculateCenterComplexity(img, p, currentBoard[r][c])
-						if complexity > maxComplexity {
-							maxComplexity = complexity
-							newLatestRow, newLatestCol = r, c
-						}
-					}
-				}
-			}
-
-			if newLatestRow != -1 {
-				latestRow, latestCol = newLatestRow, newLatestCol
-			}
-		}
-
-		// 10. 对于高手数图片，增强坐标映射的准确性
-		if estimatedHandNumber > 50 {
-			// 检查坐标是否在合理范围内
-			if latestCol < 0 || latestCol >= 19 || latestRow < 0 || latestRow >= 19 {
-				// 坐标超出范围，尝试重新寻找
-				maxComplexity := 0.0
-				newLatestRow, newLatestCol := -1, -1
-
-				for r := 0; r < 19; r++ {
-					for c := 0; c < 19; c++ {
-						if currentBoard[r][c] != ColorNone {
-							p := image.Point{X: d.VGrid[c], Y: d.HGrid[r]}
-							complexity := d.CalculateCenterComplexity(img, p, currentBoard[r][c])
-							if complexity > maxComplexity {
-								maxComplexity = complexity
-								newLatestRow, newLatestCol = r, c
-							}
-						}
-					}
-				}
-
-				if newLatestRow != -1 {
-					latestRow, latestCol = newLatestRow, newLatestCol
-				}
-			}
-		}
-	}
-
-	// 10. 增强颜色识别：对于高手数图片，使用更严格的颜色阈值
-	if estimatedHandNumber > 50 && latestRow != -1 && latestCol != -1 {
-		p := image.Point{X: d.VGrid[latestCol], Y: d.HGrid[latestRow]}
-		// 使用更严格的颜色分析
-		strictColor := d.AnalyzeStoneColorStrict(img, p, latestRow, latestCol)
-		if strictColor != ColorNone {
-			color = strictColor
-			currentBoard[latestRow][latestCol] = color
-		}
-	}
-
-	handNumber := fmt.Sprintf("%d", estimatedHandNumber)
 	return latestRow, latestCol, color, handNumber
 }
 
@@ -701,15 +563,20 @@ func min(a, b int) int {
 	return b
 }
 
-// CalculateCenterComplexity 计算棋子中心的复杂度，专门寻找腾讯围棋的红色最新落点标记
+// CalculateCenterComplexity 计算棋子标记复杂度，针对腾讯围棋进行优化
+// 黑棋最新一手左上角有红色标记，白棋最新一手左上角有蓝色标记
 func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, stoneColor int) float64 {
 	if stoneColor == ColorNone {
 		return 0
 	}
 
-	// 1. 检测红色标记区域
-	regionSize := 12 // 增大区域大小以更好地捕捉红色标记
-	rect := image.Rect(center.X-regionSize, center.Y-regionSize, center.X+regionSize, center.Y+regionSize)
+	// 1. 定义检测区域：聚焦于棋子的左上角部分
+	// 腾讯围棋的标记通常在棋子边缘，偏移中心点往左上移动
+	regionSize := 10
+	offsetX := -6
+	offsetY := -6
+	rect := image.Rect(center.X+offsetX-regionSize, center.Y+offsetY-regionSize, center.X+offsetX+regionSize, center.Y+offsetY+regionSize)
+
 	if rect.Min.X < 0 || rect.Min.Y < 0 || rect.Max.X > img.Cols() || rect.Max.Y > img.Rows() {
 		return 0
 	}
@@ -717,42 +584,52 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 	roi := img.Region(rect)
 	defer roi.Close()
 
-	// 转换为 HSV 色彩空间以更好地检测红色
+	// 2. 转换为 HSV 色彩空间以进行颜色提取
 	hsv := gocv.NewMat()
 	defer hsv.Close()
 	gocv.CvtColor(roi, &hsv, gocv.ColorBGRToHSV)
 
-	// 定义红色的 HSV 范围
-	// 红色在 HSV 中分为两个范围：0-10 和 160-180
-	lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(0, 100, 100, 0), gocv.MatTypeCV8UC3)
-	upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(10, 255, 255, 0), gocv.MatTypeCV8UC3)
-	lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(160, 100, 100, 0), gocv.MatTypeCV8UC3)
-	upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(180, 255, 255, 0), gocv.MatTypeCV8UC3)
+	mask := gocv.NewMat()
+	defer mask.Close()
 
-	// 提取红色区域
-	mask1 := gocv.NewMat()
-	mask2 := gocv.NewMat()
-	defer mask1.Close()
-	defer mask2.Close()
-	gocv.InRange(hsv, lowerRed1, upperRed1, &mask1)
-	gocv.InRange(hsv, lowerRed2, upperRed2, &mask2)
+	if stoneColor == ColorBlack {
+		// 检测红色标记 (黑棋)
+		lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(0, 100, 100, 0), gocv.MatTypeCV8UC3)
+		upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(10, 255, 255, 0), gocv.MatTypeCV8UC3)
+		lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(160, 100, 100, 0), gocv.MatTypeCV8UC3)
+		upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(180, 255, 255, 0), gocv.MatTypeCV8UC3)
+		defer lowerRed1.Close()
+		defer upperRed1.Close()
+		defer lowerRed2.Close()
+		defer upperRed2.Close()
 
-	// 合并两个红色掩码
-	redMask := gocv.NewMat()
-	defer redMask.Close()
-	gocv.BitwiseOr(mask1, mask2, &redMask)
-
-	// 计算红色像素比例
-	redPixels := gocv.CountNonZero(redMask)
-	totalPixels := redMask.Rows() * redMask.Cols()
-	redRatio := float64(redPixels) / float64(totalPixels)
-
-	// 如果红色比例足够高，认为是最新落点
-	if redRatio > 0.2 {
-		return 1000.0 + redRatio*1000.0 // 给一个极大的基础分
+		m1 := gocv.NewMat()
+		m2 := gocv.NewMat()
+		defer m1.Close()
+		defer m2.Close()
+		gocv.InRange(hsv, lowerRed1, upperRed1, &m1)
+		gocv.InRange(hsv, lowerRed2, upperRed2, &m2)
+		gocv.BitwiseOr(m1, m2, &mask)
+	} else if stoneColor == ColorWhite {
+		// 检测蓝色标记 (白棋)
+		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(100, 150, 50, 0), gocv.MatTypeCV8UC3)
+		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(140, 255, 255, 0), gocv.MatTypeCV8UC3)
+		defer lowerBlue.Close()
+		defer upperBlue.Close()
+		gocv.InRange(hsv, lowerBlue, upperBlue, &mask)
 	}
 
-	// 2. 备选方案：计算灰度标准差 (寻找数字等标记)
+	// 3. 计算颜色像素比例
+	activePixels := gocv.CountNonZero(mask)
+	totalPixels := mask.Rows() * mask.Cols()
+	ratio := float64(activePixels) / float64(totalPixels)
+
+	// 如果标记颜色比例足够高，判定为最新落点
+	if ratio > 0.1 {
+		return 2000.0 + ratio*1000.0 // 极高分值
+	}
+
+	// 4. 备选方案：计算灰度标准差 (寻找可能存在的数字或其他变化)
 	grayROI := gocv.NewMat()
 	defer grayROI.Close()
 	gocv.CvtColor(roi, &grayROI, gocv.ColorBGRToGray)
@@ -764,10 +641,8 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 	gocv.MeanStdDev(grayROI, &meanMat, &stddevMat)
 
 	stdDev := stddevMat.GetDoubleAt(0, 0)
-
-	// 3. 结合红色检测和标准差
-	if stdDev > 50 {
-		return 500.0 + stdDev // 给一个较高的分数
+	if stdDev > 40 {
+		return 500.0 + stdDev
 	}
 
 	return stdDev
