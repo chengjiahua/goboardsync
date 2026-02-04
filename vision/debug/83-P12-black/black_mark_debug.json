@@ -1,0 +1,84 @@
+{
+  "move_number": 83,
+  "image_size": "1024x1024",
+  "hsv_color_range": {
+    "lower_red1": {
+      "h": 0,
+      "s": 30,
+      "v": 30
+    },
+    "upper_red1": {
+      "h": 25,
+      "s": 255,
+      "v": 255
+    },
+    "lower_red2": {
+      "h": 150,
+      "s": 30,
+      "v": 30
+    },
+    "upper_red2": {
+      "h": 180,
+      "s": 255,
+      "v": 255
+    }
+  },
+  "median_blur": {
+    "kernel_size": 3
+  },
+  "gaussian_blur": {
+    "kernel_size": {
+      "x": 3,
+      "y": 3
+    },
+    "sigma_x": 0.5,
+    "sigma_y": 0.5
+  },
+  "morphology": {
+    "kernel_size": {
+      "x": 3,
+      "y": 3
+    },
+    "kernel_type": "Ellipse",
+    "operation": "Close"
+  },
+  "contour_info": {
+    "total_contours": 232,
+    "valid_contours": 232,
+    "min_area": 2,
+    "max_area": 10000,
+    "min_aspect_ratio": 0,
+    "max_aspect_ratio": 8
+  },
+  "selected_contour": {
+    "index": 13,
+    "area": 195,
+    "perimeter": 61.59797930717468,
+    "circularity": 0.6458200802349005,
+    "aspect_ratio": 1.2352941176470589,
+    "score": 1305.3123602366886,
+    "bounds": {
+      "min": {
+        "x": 514,
+        "y": 889
+      },
+      "max": {
+        "x": 535,
+        "y": 906
+      }
+    }
+  },
+  "final_mark_point": {
+    "x": 524,
+    "y": 897
+  },
+  "stone_verification": {
+    "grid_distance": 17.69180601295413,
+    "within_threshold": true,
+    "brightness": 47.191976584022036,
+    "expected_color": "black",
+    "verified": true
+  },
+  "detection_method": "HSV_BLACK_OPTIMIZED",
+  "success": true
+}

@@ -49,6 +49,91 @@ var FixedBoardCropPercent = map[string]CropPercent{
 	"1125x2436": {Top: 0.0, Bottom: 0.0, Left: 0.0, Right: 0.0},
 }
 
+// BlackMarkHSVParams 黑棋红色角标检测的HSV参数
+type BlackMarkHSVParams struct {
+	// 红色角标HSV颜色范围
+	LowerRed1H float64
+	LowerRed1S float64
+	LowerRed1V float64
+	UpperRed1H float64
+	UpperRed1S float64
+	UpperRed1V float64
+	LowerRed2H float64
+	LowerRed2S float64
+	LowerRed2V float64
+	UpperRed2H float64
+	UpperRed2S float64
+	UpperRed2V float64
+
+	// 蓝色角标HSV颜色范围
+	LowerBlueH float64
+	LowerBlueS float64
+	LowerBlueV float64
+	UpperBlueH float64
+	UpperBlueS float64
+	UpperBlueV float64
+
+	// 预处理参数
+	MedianBlurKernel   int
+	GaussianBlurKernel int
+	GaussianBlurSigma  float64
+
+	// 形态学操作参数
+	MorphKernelSize int
+
+	// 轮廓筛选参数
+	MinArea        float64
+	MaxArea        float64
+	MaxAspectRatio float64
+
+	// 验证参数
+	MaxGridDistanceRatio float64
+	MaxBrightness        float64
+}
+
+// BlackMarkParams 全局黑棋红色角标检测参数
+var BlackMarkParams = BlackMarkHSVParams{
+	// 红色角标HSV颜色范围 - 优化为更适合检测红色角标
+	// 注意：在OpenCV中，H范围是0-180，S和V范围是0-255
+	LowerRed1H: 0.0,
+	LowerRed1S: 30.0, // 进一步降低饱和度阈值，检测更淡的红色
+	LowerRed1V: 30.0, // 进一步降低亮度阈值，检测更暗的红色
+	UpperRed1H: 25.0, // 进一步扩大红色范围到橙色
+	UpperRed1S: 255.0,
+	UpperRed1V: 255.0,
+	LowerRed2H: 150.0, // 进一步扩大红色范围到紫色
+	LowerRed2S: 30.0,  // 进一步降低饱和度阈值
+	LowerRed2V: 30.0,  // 进一步降低亮度阈值
+	UpperRed2H: 180.0,
+	UpperRed2S: 255.0,
+	UpperRed2V: 255.0,
+
+	// 蓝色角标HSV颜色范围
+	LowerBlueH: 90.0,
+	LowerBlueS: 80.0,
+	LowerBlueV: 80.0,
+	UpperBlueH: 135.0,
+	UpperBlueS: 255.0,
+	UpperBlueV: 255.0,
+
+	// 预处理参数 - 减少模糊，保留更多细节
+	MedianBlurKernel:   3,
+	GaussianBlurKernel: 3,
+	GaussianBlurSigma:  0.5, // 降低高斯模糊强度
+
+	// 形态学操作参数
+	MorphKernelSize: 3, // 减小kernel size，保留更多细节
+
+	// 轮廓筛选参数
+	MinArea:        2.0,     // 调整最小面积阈值
+	MaxArea:        10000.0, // 调整最大面积阈值
+	MaxAspectRatio: 8.0,     // 调整最大宽高比阈值
+
+	// 验证参数
+	MaxGridDistanceRatio: 0.4,   // 调整网格距离比例
+	MaxBrightness:        100.0, // 调整亮度阈值
+}
+
 const (
 	ColorNone  = 0
 	ColorBlack = 1
@@ -165,17 +250,6 @@ type Line struct {
 	Length         float64
 }
 
-// getLinePosition 获取直线的位置值
-func getLinePosition(line Line, isHorizontal bool) float64 {
-	if isHorizontal {
-		// 水平线取y值
-		return float64((line.Y1 + line.Y2) / 2)
-	} else {
-		// 垂直线取x值
-		return float64((line.X1 + line.X2) / 2)
-	}
-}
-
 // WarpBoard 透视矫正棋盘
 func WarpBoard(img gocv.Mat, corners []image.Point) (gocv.Mat, error) {
 	if len(corners) != 4 {
@@ -224,23 +298,23 @@ func FindMark(img gocv.Mat, moveNumber int) (image.Point, error) {
 
 	if isWhite {
 		// 白棋角标 - 使用用户提供的精确RGB值(28, 34, 241)
-		// 创建蓝色角标的颜色范围
-		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(15, 20, 220, 0), gocv.MatTypeCV8UC3)
+		// 创建蓝色角标的颜色范围，扩大范围以提高鲁棒性
+		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(10, 15, 210, 0), gocv.MatTypeCV8UC3)
 		defer lowerBlue.Close()
-		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(45, 50, 255, 0), gocv.MatTypeCV8UC3)
+		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(60, 80, 255, 0), gocv.MatTypeCV8UC3)
 		defer upperBlue.Close()
 		gocv.InRange(img, lowerBlue, upperBlue, &mask)
 	} else {
 		// 黑棋角标 - 使用用户提供的精确RGB值(234, 61, 53)
-		// 创建红色角标的颜色范围
-		lowerRed := gocv.NewMatFromScalar(gocv.NewScalar(210, 40, 30, 0), gocv.MatTypeCV8UC3)
+		// 创建红色角标的颜色范围，扩大范围以提高鲁棒性
+		lowerRed := gocv.NewMatFromScalar(gocv.NewScalar(10, 15, 160, 0), gocv.MatTypeCV8UC3)
 		defer lowerRed.Close()
-		upperRed := gocv.NewMatFromScalar(gocv.NewScalar(255, 85, 75, 0), gocv.MatTypeCV8UC3)
+		upperRed := gocv.NewMatFromScalar(gocv.NewScalar(100, 100, 255, 0), gocv.MatTypeCV8UC3)
 		defer upperRed.Close()
 		gocv.InRange(img, lowerRed, upperRed, &mask)
 	}
 
-	// 3. 形态学去噪
+	// 3. 形态学去噪 - 多次操作以清理噪点
 	kernel := gocv.GetStructuringElement(gocv.MorphRect, image.Point{X: 3, Y: 3})
 	defer kernel.Close()
 
@@ -248,6 +322,7 @@ func FindMark(img gocv.Mat, moveNumber int) (image.Point, error) {
 	dilated := gocv.NewMat()
 	defer dilated.Close()
 	gocv.Dilate(mask, &dilated, kernel)
+	gocv.Dilate(dilated, &dilated, kernel)
 
 	eroded := gocv.NewMat()
 	defer eroded.Close()
@@ -268,7 +343,7 @@ func FindMark(img gocv.Mat, moveNumber int) (image.Point, error) {
 		contour := contours.At(i)
 		// 计算面积
 		area := gocv.ContourArea(contour)
-		if area < 5 || area > 800 {
+		if area < 2 || area > 2000 { // 扩大面积范围
 			continue
 		}
 
@@ -278,12 +353,12 @@ func FindMark(img gocv.Mat, moveNumber int) (image.Point, error) {
 
 		// 宽高比检查 - 角标是三角形，宽高比应该接近1
 		ratio := math.Max(float64(w), float64(h)) / math.Min(float64(w), float64(h))
-		if ratio > 5.0 {
+		if ratio > 6.0 { // 稍微放松宽高比限制
 			continue
 		}
 
 		// 计算得分
-		score := area * (5.0 - ratio)
+		score := area * (6.0 - ratio)
 		if score > bestScore {
 			bestScore = score
 			bestIdx = i
@@ -302,6 +377,203 @@ func FindMark(img gocv.Mat, moveNumber int) (image.Point, error) {
 	centerY := rect.Min.Y + rect.Dy()/2
 
 	return image.Point{X: centerX, Y: centerY}, nil
+}
+
+// FindMarkHSV 使用HSV颜色空间寻找角标（优化版本，对红色更敏感）
+func FindMarkHSV(img gocv.Mat, moveNumber int) (image.Point, error) {
+	// 1. 确定目标颜色
+	isWhite := moveNumber%2 == 0
+
+	// 2. 转换到HSV颜色空间
+	hsv := gocv.NewMat()
+	defer hsv.Close()
+	gocv.CvtColor(img, &hsv, gocv.ColorBGRToHSV)
+
+	// 3. 颜色分割
+	mask := gocv.NewMat()
+	defer mask.Close()
+
+	if isWhite {
+		// 白棋角标 - 蓝色
+		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerBlueH, BlackMarkParams.LowerBlueS, BlackMarkParams.LowerBlueV, 0), gocv.MatTypeCV8UC3)
+		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperBlueH, BlackMarkParams.UpperBlueS, BlackMarkParams.UpperBlueV, 0), gocv.MatTypeCV8UC3)
+		defer lowerBlue.Close()
+		defer upperBlue.Close()
+		gocv.InRange(hsv, lowerBlue, upperBlue, &mask)
+	} else {
+		// 黑棋角标 - 红色
+		// 第一个范围: 红色起点
+		mask1 := gocv.NewMat()
+		defer mask1.Close()
+		lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed1H, BlackMarkParams.LowerRed1S, BlackMarkParams.LowerRed1V, 0), gocv.MatTypeCV8UC3)
+		upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed1H, BlackMarkParams.UpperRed1S, BlackMarkParams.UpperRed1V, 0), gocv.MatTypeCV8UC3)
+		defer lowerRed1.Close()
+		defer upperRed1.Close()
+		gocv.InRange(hsv, lowerRed1, upperRed1, &mask1)
+
+		// 第二个范围: 红色结尾
+		mask2 := gocv.NewMat()
+		defer mask2.Close()
+		lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed2H, BlackMarkParams.LowerRed2S, BlackMarkParams.LowerRed2V, 0), gocv.MatTypeCV8UC3)
+		upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed2H, BlackMarkParams.UpperRed2S, BlackMarkParams.UpperRed2V, 0), gocv.MatTypeCV8UC3)
+		defer lowerRed2.Close()
+		defer upperRed2.Close()
+		gocv.InRange(hsv, lowerRed2, upperRed2, &mask2)
+
+		// 合并两个mask
+		gocv.BitwiseOr(mask1, mask2, &mask)
+	}
+
+	// 4. 高斯滤波增强
+	filtered := gocv.NewMat()
+	defer filtered.Close()
+	gocv.GaussianBlur(mask, &filtered, image.Point{X: BlackMarkParams.GaussianBlurKernel, Y: BlackMarkParams.GaussianBlurKernel}, BlackMarkParams.GaussianBlurSigma, BlackMarkParams.GaussianBlurSigma, gocv.BorderDefault)
+
+	// 5. 形态学操作 - 闭操作填充小洞
+	kernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Point{X: BlackMarkParams.MorphKernelSize, Y: BlackMarkParams.MorphKernelSize})
+	defer kernel.Close()
+
+	closed := gocv.NewMat()
+	defer closed.Close()
+	gocv.MorphologyEx(filtered, &closed, gocv.MorphClose, kernel)
+
+	// 6. 轮廓提取
+	contours := gocv.FindContours(closed, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+
+	if contours.Size() == 0 {
+		return image.Point{}, fmt.Errorf("HSV: 未找到角标")
+	}
+
+	// 7. 轮廓筛选 - 对黑棋红色角标优化
+	bestIdx := -1
+	bestScore := 0.0
+
+	for i := 0; i < contours.Size(); i++ {
+		contour := contours.At(i)
+		// 计算面积
+		area := gocv.ContourArea(contour)
+		// 使用全局参数进行面积筛选
+		if area < BlackMarkParams.MinArea || area > BlackMarkParams.MaxArea {
+			continue
+		}
+
+		// 计算外接矩形
+		rect := gocv.BoundingRect(contour)
+		w, h := rect.Dx(), rect.Dy()
+
+		// 检查宽高比 - 角标应该接近三角形或正方形
+		if w == 0 || h == 0 {
+			continue
+		}
+		ratio := math.Max(float64(w), float64(h)) / math.Min(float64(w), float64(h))
+		// 使用全局参数进行宽高比筛选
+		if ratio > BlackMarkParams.MaxAspectRatio {
+			continue
+		}
+
+		// 计算轮廓的圆形度 (Circularity = 4*pi*Area / Perimeter^2)
+		perimeter := gocv.ArcLength(contour, true)
+		if perimeter == 0 {
+			continue
+		}
+		circularity := (4 * math.Pi * area) / (perimeter * perimeter)
+
+		// 计算得分 - 综合考虑面积、宽高比和圆形度
+		// 降低圆形度权重，因为三角形角标的圆形度较低
+		score := area * (6.0 - ratio) * (circularity + 0.5)
+		if score > bestScore {
+			bestScore = score
+			bestIdx = i
+		}
+	}
+
+	// 8. 检查是否有有效的轮廓
+	if bestIdx == -1 {
+		return image.Point{}, fmt.Errorf("HSV: 未找到有效的角标轮廓")
+	}
+
+	// 9. 计算角标中心点
+	bestContour := contours.At(bestIdx)
+	// 使用 BoundingRect 计算中心，因为 gocv.Moments 需要 Mat 而不是 PointVector
+	rect := gocv.BoundingRect(bestContour)
+	centerX := float64(rect.Min.X + rect.Dx()/2)
+	centerY := float64(rect.Min.Y + rect.Dy()/2)
+
+	return image.Point{X: int(math.Round(centerX)), Y: int(math.Round(centerY))}, nil
+}
+
+// FindMarkHSVOptimized 使用优化的HSV颜色空间寻找角标（方案A）
+func FindMarkHSVOptimized(img gocv.Mat, moveNumber int) (image.Point, error) {
+	isWhite := moveNumber%2 == 0
+	if isWhite {
+		return FindMarkHSV(img, moveNumber)
+	}
+
+	// 1. 转换到HSV颜色空间
+	hsv := gocv.NewMat()
+	defer hsv.Close()
+	gocv.CvtColor(img, &hsv, gocv.ColorBGRToHSV)
+
+	// 2. 定义红色范围 (HSV) - 使用用户提供的参数
+	// 红色在HSV中分布在两端，需要两个范围
+	lower1 := gocv.NewScalar(0, 150, 150, 0)
+	upper1 := gocv.NewScalar(10, 255, 255, 0)
+	lower2 := gocv.NewScalar(160, 150, 150, 0)
+	upper2 := gocv.NewScalar(180, 255, 255, 0)
+
+	// 创建用于InRange的边界Mat
+	l1 := gocv.NewMatWithSizeFromScalar(lower1, hsv.Rows(), hsv.Cols(), hsv.Type())
+	u1 := gocv.NewMatWithSizeFromScalar(upper1, hsv.Rows(), hsv.Cols(), hsv.Type())
+	l2 := gocv.NewMatWithSizeFromScalar(lower2, hsv.Rows(), hsv.Cols(), hsv.Type())
+	u2 := gocv.NewMatWithSizeFromScalar(upper2, hsv.Rows(), hsv.Cols(), hsv.Type())
+	defer l1.Close()
+	defer u1.Close()
+	defer l2.Close()
+	defer u2.Close()
+
+	mask1 := gocv.NewMat()
+	mask2 := gocv.NewMat()
+	mask := gocv.NewMat()
+	defer mask1.Close()
+	defer mask2.Close()
+	defer mask.Close()
+
+	// 过滤颜色
+	gocv.InRange(hsv, l1, u1, &mask1)
+	gocv.InRange(hsv, l2, u2, &mask2)
+	gocv.BitwiseOr(mask1, mask2, &mask)
+
+	// 3. 寻找红色区域的轮廓
+	contours := gocv.FindContours(mask, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+
+	if contours.Size() == 0 {
+		return image.Point{}, fmt.Errorf("HSV_Optimized: 未找到红色角标")
+	}
+
+	// 4. 找到最大的红色区域（角标）
+	var maxArea float64
+	var bestIdx int = -1
+	for i := 0; i < contours.Size(); i++ {
+		area := gocv.ContourArea(contours.At(i))
+		if area > maxArea {
+			maxArea = area
+			bestIdx = i
+		}
+	}
+
+	if bestIdx == -1 {
+		return image.Point{}, fmt.Errorf("HSV_Optimized: 未找到有效的红色角标轮廓")
+	}
+
+	// 5. 计算红色角标的中心位置
+	bestContour := contours.At(bestIdx)
+	rect := gocv.BoundingRect(bestContour)
+	centerX := float64(rect.Min.X+rect.Max.X) / 2.0
+	centerY := float64(rect.Min.Y+rect.Max.Y) / 2.0
+
+	markPt := image.Point{X: int(math.Round(centerX)), Y: int(math.Round(centerY))}
+
+	return markPt, nil
 }
 
 // FindMarkBGR 使用BGR颜色空间寻找角标（备选方案）
@@ -323,18 +595,18 @@ func FindMarkBGR(img gocv.Mat, moveNumber int) (image.Point, error) {
 
 	if isWhite {
 		// 白棋角标 - 使用用户提供的精确RGB值(28, 34, 241)
-		// 创建蓝色角标的颜色范围
-		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(15, 20, 220, 0), gocv.MatTypeCV8UC3)
+		// 创建蓝色角标的颜色范围，扩大范围以提高鲁棒性
+		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(10, 15, 210, 0), gocv.MatTypeCV8UC3)
 		defer lowerBlue.Close()
-		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(45, 50, 255, 0), gocv.MatTypeCV8UC3)
+		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(60, 80, 255, 0), gocv.MatTypeCV8UC3)
 		defer upperBlue.Close()
 		gocv.InRange(img, lowerBlue, upperBlue, &mask)
 	} else {
 		// 黑棋角标 - 使用用户提供的精确RGB值(234, 61, 53)
-		// 创建红色角标的颜色范围
-		lowerRed := gocv.NewMatFromScalar(gocv.NewScalar(210, 40, 30, 0), gocv.MatTypeCV8UC3)
+		// 创建红色角标的颜色范围，扩大范围以提高鲁棒性
+		lowerRed := gocv.NewMatFromScalar(gocv.NewScalar(200, 30, 20, 0), gocv.MatTypeCV8UC3)
 		defer lowerRed.Close()
-		upperRed := gocv.NewMatFromScalar(gocv.NewScalar(255, 85, 75, 0), gocv.MatTypeCV8UC3)
+		upperRed := gocv.NewMatFromScalar(gocv.NewScalar(255, 100, 100, 0), gocv.MatTypeCV8UC3)
 		defer upperRed.Close()
 		gocv.InRange(img, lowerRed, upperRed, &mask)
 	}
@@ -348,7 +620,7 @@ func FindMarkBGR(img gocv.Mat, moveNumber int) (image.Point, error) {
 	// 与操作，只保留内部区域的mask
 	gocv.BitwiseAnd(mask, innerMask, &mask)
 
-	// 5. 形态学去噪
+	// 5. 形态学去噪 - 多次操作以清理噪点
 	kernel := gocv.GetStructuringElement(gocv.MorphRect, image.Point{X: 3, Y: 3})
 	defer kernel.Close()
 
@@ -356,6 +628,7 @@ func FindMarkBGR(img gocv.Mat, moveNumber int) (image.Point, error) {
 	dilated := gocv.NewMat()
 	defer dilated.Close()
 	gocv.Dilate(mask, &dilated, kernel)
+	gocv.Dilate(dilated, &dilated, kernel)
 
 	eroded := gocv.NewMat()
 	defer eroded.Close()
@@ -368,7 +641,7 @@ func FindMarkBGR(img gocv.Mat, moveNumber int) (image.Point, error) {
 		return image.Point{}, fmt.Errorf("未找到角标")
 	}
 
-	// 7. 轮廓筛选 - 使用更严格的条件
+	// 7. 轮廓筛选 - 使用更宽松的条件
 	bestIdx := -1
 	bestScore := 0.0
 
@@ -376,7 +649,7 @@ func FindMarkBGR(img gocv.Mat, moveNumber int) (image.Point, error) {
 		contour := contours.At(i)
 		// 计算面积
 		area := gocv.ContourArea(contour)
-		if area < 8 || area > 600 {
+		if area < 2 || area > 2000 { // 扩大面积范围
 			continue
 		}
 
@@ -386,12 +659,12 @@ func FindMarkBGR(img gocv.Mat, moveNumber int) (image.Point, error) {
 
 		// 宽高比检查 - 角标是三角形，宽高比应该接近1
 		ratio := math.Max(float64(w), float64(h)) / math.Min(float64(w), float64(h))
-		if ratio > 4.0 {
+		if ratio > 6.0 { // 稍微放松宽高比限制
 			continue
 		}
 
 		// 计算得分
-		score := area * (4.0 - ratio)
+		score := area * (6.0 - ratio)
 		if score > bestScore {
 			bestScore = score
 			bestIdx = i
@@ -510,30 +783,26 @@ func FindLastMoveDirect(img gocv.Mat, moveNumber int) (image.Point, error) {
 	defer blurred.Close()
 	gocv.GaussianBlur(gray, &blurred, image.Point{X: 5, Y: 5}, 0, 0, gocv.BorderDefault)
 
-	// 4. 边缘检测
-	edges := gocv.NewMat()
-	defer edges.Close()
-	gocv.Canny(blurred, &edges, 50, 150)
-
-	// 5. 圆检测
+	// 4. 圆检测
 	circles := gocv.NewMat()
 	defer circles.Close()
 
 	// 估计棋子半径
 	gridSpacing := float64(BoardWarpSize) / 18.0
-	minRadius := int(0.4 * gridSpacing)
-	maxRadius := int(0.6 * gridSpacing)
+	minRadius := int(0.3 * gridSpacing) // 减小最小半径
+	maxRadius := int(0.7 * gridSpacing) // 增大最大半径
 
+	// 优化圆检测参数
 	gocv.HoughCirclesWithParams(
 		blurred, &circles, gocv.HoughGradient, 1,
-		float64(maxRadius), 50, 20, minRadius, maxRadius,
+		float64(maxRadius), 40, 15, minRadius, maxRadius, // 降低阈值以检测更多圆
 	)
 
 	if circles.Cols() == 0 {
 		return image.Point{}, fmt.Errorf("未检测到棋子")
 	}
 
-	// 6. 筛选最可能的最后一手棋子
+	// 5. 筛选最可能的最后一手棋子
 	bestCircle := image.Point{}
 	bestScore := 0.0
 
@@ -551,9 +820,7 @@ func FindLastMoveDirect(img gocv.Mat, moveNumber int) (image.Point, error) {
 
 		// 计算颜色均值
 		meanMat := gocv.NewMat()
-		defer meanMat.Close()
 		stddevMat := gocv.NewMat()
-		defer stddevMat.Close()
 		gocv.MeanStdDev(roi, &meanMat, &stddevMat)
 
 		b := meanMat.GetDoubleAt(0, 0)
@@ -568,29 +835,40 @@ func FindLastMoveDirect(img gocv.Mat, moveNumber int) (image.Point, error) {
 		minRGB := math.Min(math.Min(b, g), red)
 		colorRange := maxRGB - minRGB
 
-		// 筛选棋子
-		if colorRange > 30 {
+		// 筛选棋子 - 放宽条件
+		if colorRange > 50 {
+			meanMat.Close()
+			stddevMat.Close()
+			roi.Close()
 			continue // 颜色太鲜艳，可能不是棋子
 		}
 
-		// 根据颜色筛选
+		// 根据颜色筛选 - 放宽条件
 		if isWhite {
-			if brightness < 120 {
+			if brightness < 100 {
+				meanMat.Close()
+				stddevMat.Close()
+				roi.Close()
 				continue // 白棋应该较亮
 			}
 		} else {
-			if brightness > 100 {
+			if brightness > 120 {
+				meanMat.Close()
+				stddevMat.Close()
+				roi.Close()
 				continue // 黑棋应该较暗
 			}
 		}
 
-		// 计算得分
-		score := 1.0 / (colorRange + 1.0)
+		// 计算得分 - 考虑更多因素
+		score := 1.0 / (colorRange + 1.0) * (1.0 - math.Abs(float64(r)-gridSpacing/2.0)/(gridSpacing/2.0))
 		if score > bestScore {
 			bestScore = score
 			bestCircle = image.Point{X: cx, Y: cy}
 		}
 
+		meanMat.Close()
+		stddevMat.Close()
 		roi.Close()
 	}
 
@@ -610,12 +888,13 @@ type GridInfo struct {
 
 // CalculateGrid 计算19×19交叉点网格
 func CalculateGrid(img gocv.Mat) GridInfo {
-	// 1. 使用整个boardWarp图片作为棋盘区域，不使用margin
-	// 直接使用boardWarp的四个角作为棋盘的四个角
-	innerLeft := 0
-	innerTop := 0
-	innerRight := img.Cols()
-	innerBottom := img.Rows()
+	marginW := float64(img.Cols()) * 0
+	marginH := float64(img.Rows()) * 0
+
+	innerLeft := int(marginW)
+	innerTop := int(marginH)
+	innerRight := img.Cols() - int(marginW)
+	innerBottom := img.Rows() - int(marginH)
 
 	innerRect := image.Rect(innerLeft, innerTop, innerRight, innerBottom)
 
@@ -640,69 +919,6 @@ func CalculateGrid(img gocv.Mat) GridInfo {
 		Dy:        dy,
 		Grid:      grid,
 	}
-}
-
-// MapToGrid 将棋子中心映射到最近的交叉点
-func MapToGrid(stoneCenter image.Point, grid GridInfo) (int, int, float64) {
-	// 1. 计算最近的交叉点
-	minDist := math.MaxFloat64
-	bestI, bestJ := 0, 0
-
-	for i := 0; i < 19; i++ {
-		for j := 0; j < 19; j++ {
-			pt := grid.Grid[i][j]
-			dist := math.Hypot(float64(stoneCenter.X-pt.X), float64(stoneCenter.Y-pt.Y))
-			if dist < minDist {
-				minDist = dist
-				bestI, bestJ = i, j
-			}
-		}
-	}
-
-	// 2. 计算置信度
-	maxDist := 0.5 * math.Min(grid.Dx, grid.Dy)
-	confidence := 1.0 - minDist/maxDist
-	if confidence < 0 {
-		confidence = 0
-	} else if confidence > 1 {
-		confidence = 1
-	}
-
-	// 3. 优化：使用二次插值提高映射精度
-	// 检查周围的交叉点，使用二次插值找到更精确的映射
-	if bestI > 0 && bestI < 18 && bestJ > 0 && bestJ < 18 {
-		// 计算周围四个交叉点的距离
-		centerDist := minDist
-		topDist := math.Hypot(float64(stoneCenter.X-grid.Grid[bestI][bestJ-1].X), float64(stoneCenter.Y-grid.Grid[bestI][bestJ-1].Y))
-		bottomDist := math.Hypot(float64(stoneCenter.X-grid.Grid[bestI][bestJ+1].X), float64(stoneCenter.Y-grid.Grid[bestI][bestJ+1].Y))
-		leftDist := math.Hypot(float64(stoneCenter.X-grid.Grid[bestI-1][bestJ].X), float64(stoneCenter.Y-grid.Grid[bestI-1][bestJ].Y))
-		rightDist := math.Hypot(float64(stoneCenter.X-grid.Grid[bestI+1][bestJ].X), float64(stoneCenter.Y-grid.Grid[bestI+1][bestJ].Y))
-
-		// 基于距离进行简单的权重调整
-		if topDist < centerDist {
-			bestJ--
-		} else if bottomDist < centerDist {
-			bestJ++
-		}
-
-		if leftDist < centerDist {
-			bestI--
-		} else if rightDist < centerDist {
-			bestI++
-		}
-	}
-
-	// 4. 转换为1-based坐标
-	// 直接计算最终坐标
-	// X轴：0-18 -> 1-19，对应A-S
-	// Y轴：0-18 -> 1-19，然后转换为19-1
-	x := bestI + 1 // X轴：0-18 -> 1-19，对应A-S
-	y := bestJ + 1 // Y轴：0-18 -> 1-19
-
-	// 转换Y轴方向：1-19 -> 19-1
-	y = 20 - y
-
-	return x, y, confidence
 }
 
 // VerifyMoveNumber 验证棋子上的手数数字
@@ -773,8 +989,8 @@ func ConvertToGTP(row, col int) string {
 	// 列转换为字母 (A-S，不跳过I，共19列)
 	colChar := 'A' + col
 
-	// 行就是直接使用 0-19
-	return fmt.Sprintf("%c%d", colChar, row)
+	// 行转换为1-19（GTP格式）
+	return fmt.Sprintf("%c%d", colChar, row+1)
 }
 
 // ConvertGTPToCoords 将GTP坐标转换为数值坐标 (col, row)
@@ -791,9 +1007,9 @@ func ConvertGTPToCoords(gtp string) (int, int) {
 	}
 	col := int(colChar - 'A')
 
-	// 解析行 (数字部分，0-19)
+	// 解析行 (数字部分，1-19 转换为 0-18)
 	rowNum, err := strconv.Atoi(gtp[1:])
-	if err != nil || rowNum < 0 || rowNum >= 19 {
+	if err != nil || rowNum < 1 || rowNum > 19 {
 		return -1, -1
 	}
 
@@ -802,7 +1018,7 @@ func ConvertGTPToCoords(gtp string) (int, int) {
 		return -1, -1
 	}
 
-	return col, rowNum
+	return col, rowNum - 1 // GTP行号1-19转换为0-18
 }
 
 // BatchRecognitionStats 批量识别统计信息
@@ -1103,113 +1319,41 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 
 	// 2. 寻找角标
 	debugInfo["step"] = "mark_detection"
-	markPt, err := FindMark(warped, moveNumber)
-	if err != nil {
-		debugInfo["hsv_mark_error"] = err.Error()
-		// HSV 颜色空间角标检测失败，尝试使用 BGR 颜色空间
-		markPt, err = FindMarkBGR(warped, moveNumber)
+	isBlack := moveNumber%2 == 1
+
+	var markPt image.Point
+
+	if isBlack {
+		// 黑棋只使用优化的HSV红色检测（方案A）
+		markPt, err = FindMarkHSVOptimized(warped, moveNumber)
 		if err != nil {
-			debugInfo["bgr_mark_error"] = err.Error()
-			// 角标检测失败，尝试直接检测棋子
-			stoneCenter, directErr := FindLastMoveDirect(warped, moveNumber)
-			if directErr != nil {
-				debugInfo["direct_detection_error"] = directErr.Error()
-				debugInfo["final_status"] = "failed_at_mark_detection"
-				// 所有检测方法都失败，返回默认结果
-				color := "B"
-				if moveNumber%2 == 0 {
-					color = "W"
-				}
-				return Result{
-					Move:       moveNumber,
-					Color:      color,
-					X:          0,
-					Y:          0,
-					Confidence: 0,
-					Debug:      debugInfo,
-				}, nil
-			} else {
-				debugInfo["detection_method"] = "direct"
-				debugInfo["detected_stone_center"] = stoneCenter
-
-				// 4. 计算网格并映射
-				debugInfo["step"] = "grid_calculation"
-				grid := CalculateGrid(warped)
-				debugInfo["grid_inner_rect"] = grid.InnerRect
-				debugInfo["grid_spacing"] = fmt.Sprintf("dx: %.2f, dy: %.2f", grid.Dx, grid.Dy)
-
-				// 5. 手动计算最近的交叉点（修复坐标映射问题）
-				minDist := math.MaxFloat64
-				bestCol, bestRow := 0, 0
-
-				for col := 0; col < 19; col++ {
-					for row := 0; row < 19; row++ {
-						pt := grid.Grid[col][row]
-						dist := math.Hypot(float64(stoneCenter.X-pt.X), float64(stoneCenter.Y-pt.Y))
-						if dist < minDist {
-							minDist = dist
-							bestCol, bestRow = col, row
-						}
-					}
-				}
-
-				// 6. 计算置信度
-				maxDist := 0.5 * math.Min(grid.Dx, grid.Dy)
-				confidence := 1.0 - minDist/maxDist
-				if confidence < 0 {
-					confidence = 0
-				} else if confidence > 1 {
-					confidence = 1
-				}
-
-				// 7. 转换为1-based坐标
-				col := bestCol
-				row := bestRow
-
-				debugInfo["mapped_coordinates"] = fmt.Sprintf("col: %s, row: %d", string('A'+byte(col)), row)
-				debugInfo["grid_confidence"] = confidence
-
-				// 8. 验证手数数字
-				debugInfo["step"] = "move_verification"
-				oCRVerified, ocrErr := VerifyMoveNumber(warped, stoneCenter, moveNumber)
-				debugInfo["ocr_verified"] = oCRVerified
-				if ocrErr != nil {
-					debugInfo["ocr_error"] = ocrErr.Error()
-				}
-
-				// 9. 计算最终置信度
-				debugInfo["step"] = "confidence_calculation"
-				finalConfidence := CalculateFinalConfidence(confidence, oCRVerified)
-				debugInfo["final_confidence"] = finalConfidence
-
-				// 10. 确定颜色
-				color := "B"
-				if moveNumber%2 == 0 {
-					color = "W"
-				}
-				debugInfo["predicted_color"] = color
-
-				// 11. 构建结果
-				debugInfo["final_status"] = "success"
-				result := Result{
-					Move:       moveNumber,
-					Color:      color,
-					X:          col,
-					Y:          row,
-					Confidence: finalConfidence,
-					Debug:      debugInfo,
-				}
-
-				return result, nil
-			}
-		} else {
-			debugInfo["mark_detection_method"] = "BGR"
-			debugInfo["detected_mark_point"] = markPt
+			debugInfo["hsv_optimized_mark_error"] = err.Error()
 		}
 	} else {
-		debugInfo["mark_detection_method"] = "HSV"
-		debugInfo["detected_mark_point"] = markPt
+		// 白棋先用原始 BGR 方法
+		markPt, err = FindMark(warped, moveNumber)
+		if err != nil {
+			debugInfo["bgr_mark_error"] = err.Error()
+			// 原始方法失败 -> 尝试 HSV
+			markPt, err = FindMarkHSV(warped, moveNumber)
+			if err != nil {
+				debugInfo["hsv_mark_error"] = err.Error()
+				// HSV 也失败 -> 尝试 BGR 备选
+				markPt, err = FindMarkBGR(warped, moveNumber)
+				if err != nil {
+					debugInfo["bgr_mark_error"] = err.Error()
+				}
+			}
+		}
 	}
+
+	// 记录使用的检测方法
+	if isBlack {
+		debugInfo["mark_detection_method"] = "HSV_BLACK"
+	} else {
+		debugInfo["mark_detection_method"] = "BGR_WHITE"
+	}
+	debugInfo["detected_mark_point"] = markPt
 
 	// 3. 寻找棋子中心
 	debugInfo["step"] = "stone_center_detection"
@@ -1235,36 +1379,39 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 	debugInfo["grid_inner_rect"] = grid.InnerRect
 	debugInfo["grid_spacing"] = fmt.Sprintf("dx: %.2f, dy: %.2f", grid.Dx, grid.Dy)
 
-	// 5. 手动计算最近的交叉点（修复坐标映射问题）
+	// 5. 使用角标(markPt)的坐标（蓝色点）直接映射到最近的交叉点
+	// 以 markPt 为候选点，找到最近的交叉点作为最终坐标
 	minDist := math.MaxFloat64
 	bestCol, bestRow := 0, 0
 
-	for col := 0; col < 19; col++ {
-		for row := 0; row < 19; row++ {
-			pt := grid.Grid[col][row]
-			dist := math.Hypot(float64(stoneCenter.X-pt.X), float64(stoneCenter.Y-pt.Y))
+	for colIdx := 0; colIdx < 19; colIdx++ {
+		for rowIdx := 0; rowIdx < 19; rowIdx++ {
+			pt := grid.Grid[colIdx][rowIdx]
+			dist := math.Hypot(float64(markPt.X-pt.X), float64(markPt.Y-pt.Y))
 			if dist < minDist {
 				minDist = dist
-				bestCol, bestRow = col, row
+				bestCol, bestRow = colIdx, rowIdx
 			}
 		}
 	}
 
-	// 6. 计算置信度
+	// 6. 计算置信度（基于 mark 到最近交叉点的距离）
 	maxDist := 0.5 * math.Min(grid.Dx, grid.Dy)
-	confidence := 1.0 - minDist/maxDist
-	if confidence < 0 {
-		confidence = 0
-	} else if confidence > 1 {
-		confidence = 1
+	gridConfidence := 1.0 - minDist/maxDist
+	if gridConfidence < 0 {
+		gridConfidence = 0
+	} else if gridConfidence > 1 {
+		gridConfidence = 1
 	}
 
-	// 7. 转换为1-based坐标
+	// 7. 使用 0-based 索引作为结果
 	col := bestCol
 	row := bestRow
 
 	debugInfo["mapped_coordinates"] = fmt.Sprintf("col: %s, row: %d", string('A'+byte(col)), row)
-	debugInfo["grid_confidence"] = confidence
+	debugInfo["mark_mapping_index"] = map[string]int{"col": col, "row": row}
+	debugInfo["mark_mapping_confidence"] = gridConfidence
+	debugInfo["grid_confidence"] = gridConfidence
 
 	// 8. 验证手数数字
 	debugInfo["step"] = "move_verification"
@@ -1276,7 +1423,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 
 	// 9. 计算最终置信度
 	debugInfo["step"] = "confidence_calculation"
-	finalConfidence := CalculateFinalConfidence(confidence, oCRVerified)
+	finalConfidence := CalculateFinalConfidence(gridConfidence, oCRVerified)
 	debugInfo["final_confidence"] = finalConfidence
 
 	// 10. 确定颜色
@@ -1387,9 +1534,73 @@ func SaveDebugImages(img gocv.Mat, moveNumber int, outputDir string) error {
 		return fmt.Errorf("无法保存棋盘矫正结果")
 	}
 
-	// 2. 生成角标颜色mask
-	maskPath := filepath.Join(outputDir, "debug_mark_mask.jpg")
-	if err := saveMarkMask(warped, moveNumber, maskPath); err != nil {
+	// --- 计算并保存角标相关中间值（mark, cell, rightBottom, mapped grid）到 debug_corners.json ---
+	var markPt image.Point
+	markPt, err = FindMark(warped, moveNumber)
+	if err != nil {
+		// 尝试 BGR 方案
+		markPt, _ = FindMarkBGR(warped, moveNumber)
+	}
+
+	grid := CalculateGrid(warped)
+	halfDx := int(math.Round(grid.Dx / 2.0))
+	halfDy := int(math.Round(grid.Dy / 2.0))
+
+	cellRect := image.Rect(markPt.X-halfDx, markPt.Y-halfDy, markPt.X+halfDx, markPt.Y+halfDy)
+	if cellRect.Min.X < 0 {
+		cellRect.Min.X = 0
+	}
+	if cellRect.Min.Y < 0 {
+		cellRect.Min.Y = 0
+	}
+	if cellRect.Max.X > warped.Cols() {
+		cellRect.Max.X = warped.Cols()
+	}
+	if cellRect.Max.Y > warped.Rows() {
+		cellRect.Max.Y = warped.Rows()
+	}
+
+	rightBottom := image.Point{X: cellRect.Max.X, Y: cellRect.Max.Y}
+
+	// 找到最近交叉点索引
+	minDist := math.MaxFloat64
+	bestCol, bestRow := 0, 0
+	for ci := 0; ci < 19; ci++ {
+		for rj := 0; rj < 19; rj++ {
+			pt := grid.Grid[ci][rj]
+			d := math.Hypot(float64(rightBottom.X-pt.X), float64(rightBottom.Y-pt.Y))
+			if d < minDist {
+				minDist = d
+				bestCol, bestRow = ci, rj
+			}
+		}
+	}
+	maxDist2 := 0.5 * math.Min(grid.Dx, grid.Dy)
+	mapConf := 1.0 - minDist/maxDist2
+	if mapConf < 0 {
+		mapConf = 0
+	}
+	if mapConf > 1 {
+		mapConf = 1
+	}
+
+	cornersInfoExt := map[string]any{
+		"resKey":             resKey,
+		"imgWidth":           img.Cols(),
+		"imgHeight":          img.Rows(),
+		"corners":            corners,
+		"mark_point":         markPt,
+		"mark_cell":          cellRect,
+		"mark_rb":            rightBottom,
+		"mapped_grid":        map[string]int{"col": bestCol, "row": bestRow},
+		"mapping_confidence": mapConf,
+	}
+	if b2, err2 := json.MarshalIndent(cornersInfoExt, "", "  "); err2 == nil {
+		_ = os.WriteFile(filepath.Join(outputDir, "debug_corners.json"), b2, 0644)
+	}
+
+	// 保存黑棋红色角标识别的详细参数
+	if err := SaveBlackMarkDebugInfo(warped, moveNumber, outputDir); err != nil {
 		return err
 	}
 
@@ -1416,17 +1627,17 @@ func saveMarkMask(img gocv.Mat, moveNumber int, outputPath string) error {
 	isWhite := moveNumber%2 == 0
 	if isWhite {
 		// 蓝色角标
-		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(90, 80, 80, 0), gocv.MatTypeCV8UC3)
-		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(135, 255, 255, 0), gocv.MatTypeCV8UC3)
+		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerBlueH, BlackMarkParams.LowerBlueS, BlackMarkParams.LowerBlueV, 0), gocv.MatTypeCV8UC3)
+		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperBlueH, BlackMarkParams.UpperBlueS, BlackMarkParams.UpperBlueV, 0), gocv.MatTypeCV8UC3)
 		defer lowerBlue.Close()
 		defer upperBlue.Close()
 		gocv.InRange(hsv, lowerBlue, upperBlue, &mask)
 	} else {
 		// 红色角标（两段）
-		lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(0, 80, 80, 0), gocv.MatTypeCV8UC3)
-		upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(10, 255, 255, 0), gocv.MatTypeCV8UC3)
-		lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(160, 80, 80, 0), gocv.MatTypeCV8UC3)
-		upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(179, 255, 255, 0), gocv.MatTypeCV8UC3)
+		lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed1H, BlackMarkParams.LowerRed1S, BlackMarkParams.LowerRed1V, 0), gocv.MatTypeCV8UC3)
+		upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed1H, BlackMarkParams.UpperRed1S, BlackMarkParams.UpperRed1V, 0), gocv.MatTypeCV8UC3)
+		lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed2H, BlackMarkParams.LowerRed2S, BlackMarkParams.LowerRed2V, 0), gocv.MatTypeCV8UC3)
+		upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed2H, BlackMarkParams.UpperRed2S, BlackMarkParams.UpperRed2V, 0), gocv.MatTypeCV8UC3)
 		defer lowerRed1.Close()
 		defer upperRed1.Close()
 		defer lowerRed2.Close()
@@ -1469,31 +1680,12 @@ func saveOverlayImage(img gocv.Mat, corners []image.Point, moveNumber int, outpu
 		gocv.Rectangle(&overlay, markRect, color.RGBA{0, 0, 255, 0}, 2)
 	}
 
-	// 3. 绘制棋子中心
-	if err == nil {
-		stoneCenter, err := FindStoneCenter(img, markPt)
-		if err == nil {
-			// 绘制棋子中心点
-			gocv.Circle(&overlay, stoneCenter, 5, color.RGBA{255, 0, 0, 0}, -1)
-			// 绘制棋子半径
-			gridSpacing := float64(BoardWarpSize) / 19.0
-			rStone := 0.45 * gridSpacing
-			gocv.Circle(&overlay, stoneCenter, int(rStone), color.RGBA{255, 0, 0, 0}, 2)
-
-			// 4. 绘制最近的交叉点
-			x, y, _ := MapToGrid(stoneCenter, grid)
-			crossPt := grid.Grid[x-1][y-1]
-			gocv.Circle(&overlay, crossPt, 5, color.RGBA{255, 255, 0, 0}, -1)
-			// 绘制连接线
-			gocv.Line(&overlay, stoneCenter, crossPt, color.RGBA{255, 255, 0, 0}, 2)
-		}
-	}
-
-	// 5. 绘制网格线
+	// 5. 绘制网格点：所有 19×19 交叉点都用黄色小点标出（便于直观检查网格对齐）
 	for i := 0; i < 19; i++ {
 		for j := 0; j < 19; j++ {
 			pt := grid.Grid[i][j]
-			gocv.Circle(&overlay, pt, 2, color.RGBA{128, 128, 128, 0}, -1)
+			// 用黄色小点标出所有网格交叉点（半径加大到 3 便于观看）
+			gocv.Circle(&overlay, pt, 3, color.RGBA{0, 255, 255, 0}, -1)
 		}
 	}
 
@@ -1502,6 +1694,346 @@ func saveOverlayImage(img gocv.Mat, corners []image.Point, moveNumber int, outpu
 		return fmt.Errorf("无法保存叠加图: %s", outputPath)
 	}
 	return nil
+}
+
+// BlackMarkDebugInfo 黑棋红色角标识别的详细参数结构
+type BlackMarkDebugInfo struct {
+	MoveNumber        int               `json:"move_number"`
+	ImageSize         string            `json:"image_size"`
+	HSVColorRange     HSVColorRange     `json:"hsv_color_range"`
+	MedianBlur        MedianBlur        `json:"median_blur"`
+	GaussianBlur      GaussianBlur      `json:"gaussian_blur"`
+	Morphology        Morphology        `json:"morphology"`
+	ContourInfo       ContourInfo       `json:"contour_info"`
+	SelectedContour   SelectedContour   `json:"selected_contour"`
+	FinalMarkPoint    Point             `json:"final_mark_point"`
+	StoneVerification StoneVerification `json:"stone_verification,omitempty"`
+	DetectionMethod   string            `json:"detection_method"`
+	Success           bool              `json:"success"`
+	ErrorMessage      string            `json:"error_message,omitempty"`
+}
+
+type HSVColorRange struct {
+	LowerRed1 Point3D `json:"lower_red1"`
+	UpperRed1 Point3D `json:"upper_red1"`
+	LowerRed2 Point3D `json:"lower_red2"`
+	UpperRed2 Point3D `json:"upper_red2"`
+}
+
+type Point3D struct {
+	H float64 `json:"h"`
+	S float64 `json:"s"`
+	V float64 `json:"v"`
+}
+
+type MedianBlur struct {
+	KernelSize int `json:"kernel_size"`
+}
+
+type GaussianBlur struct {
+	KernelSize Point   `json:"kernel_size"`
+	SigmaX     float64 `json:"sigma_x"`
+	SigmaY     float64 `json:"sigma_y"`
+}
+
+type Morphology struct {
+	KernelSize Point  `json:"kernel_size"`
+	KernelType string `json:"kernel_type"`
+	Operation  string `json:"operation"`
+}
+
+type ContourInfo struct {
+	TotalContours  int     `json:"total_contours"`
+	ValidContours  int     `json:"valid_contours"`
+	MinArea        float64 `json:"min_area"`
+	MaxArea        float64 `json:"max_area"`
+	MinAspectRatio float64 `json:"min_aspect_ratio"`
+	MaxAspectRatio float64 `json:"max_aspect_ratio"`
+}
+
+type SelectedContour struct {
+	Index       int     `json:"index"`
+	Area        float64 `json:"area"`
+	Perimeter   float64 `json:"perimeter"`
+	Circularity float64 `json:"circularity"`
+	AspectRatio float64 `json:"aspect_ratio"`
+	Score       float64 `json:"score"`
+	Bounds      Rect    `json:"bounds"`
+}
+
+type StoneVerification struct {
+	GridDistance    float64 `json:"grid_distance"`
+	WithinThreshold bool    `json:"within_threshold"`
+	Brightness      float64 `json:"brightness"`
+	ExpectedColor   string  `json:"expected_color"`
+	Verified        bool    `json:"verified"`
+}
+
+type Point struct {
+	X int `json:"x"`
+	Y int `json:"y"`
+}
+
+type Rect struct {
+	Min Point `json:"min"`
+	Max Point `json:"max"`
+}
+
+// SaveBlackMarkDebugInfo 保存黑棋红色角标识别的详细参数到JSON文件
+func SaveBlackMarkDebugInfo(img gocv.Mat, moveNumber int, outputDir string) error {
+	isBlack := moveNumber%2 == 1
+	if !isBlack {
+		return nil
+	}
+
+	gridSpacing := float64(BoardWarpSize) / 18.0
+
+	debugInfo := BlackMarkDebugInfo{
+		MoveNumber:      moveNumber,
+		ImageSize:       fmt.Sprintf("%dx%d", img.Cols(), img.Rows()),
+		DetectionMethod: "HSV_BLACK_OPTIMIZED",
+		Success:         false,
+	}
+
+	median := gocv.NewMat()
+	defer median.Close()
+	gocv.MedianBlur(img, &median, BlackMarkParams.MedianBlurKernel)
+
+	debugInfo.MedianBlur = MedianBlur{
+		KernelSize: BlackMarkParams.MedianBlurKernel,
+	}
+
+	hsv := gocv.NewMat()
+	defer hsv.Close()
+	gocv.CvtColor(median, &hsv, gocv.ColorBGRToHSV)
+
+	mask := gocv.NewMat()
+	defer mask.Close()
+
+	lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed1H, BlackMarkParams.LowerRed1S, BlackMarkParams.LowerRed1V, 0), gocv.MatTypeCV8UC3)
+	defer lowerRed1.Close()
+	upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed1H, BlackMarkParams.UpperRed1S, BlackMarkParams.UpperRed1V, 0), gocv.MatTypeCV8UC3)
+	defer upperRed1.Close()
+	lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed2H, BlackMarkParams.LowerRed2S, BlackMarkParams.LowerRed2V, 0), gocv.MatTypeCV8UC3)
+	defer lowerRed2.Close()
+	upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed2H, BlackMarkParams.UpperRed2S, BlackMarkParams.UpperRed2V, 0), gocv.MatTypeCV8UC3)
+	defer upperRed2.Close()
+
+	debugInfo.HSVColorRange = HSVColorRange{
+		LowerRed1: Point3D{H: BlackMarkParams.LowerRed1H, S: BlackMarkParams.LowerRed1S, V: BlackMarkParams.LowerRed1V},
+		UpperRed1: Point3D{H: BlackMarkParams.UpperRed1H, S: BlackMarkParams.UpperRed1S, V: BlackMarkParams.UpperRed1V},
+		LowerRed2: Point3D{H: BlackMarkParams.LowerRed2H, S: BlackMarkParams.LowerRed2S, V: BlackMarkParams.LowerRed2V},
+		UpperRed2: Point3D{H: BlackMarkParams.UpperRed2H, S: BlackMarkParams.UpperRed2S, V: BlackMarkParams.UpperRed2V},
+	}
+
+	mask1 := gocv.NewMat()
+	defer mask1.Close()
+	mask2 := gocv.NewMat()
+	defer mask2.Close()
+	gocv.InRange(hsv, lowerRed1, upperRed1, &mask1)
+	gocv.InRange(hsv, lowerRed2, upperRed2, &mask2)
+	gocv.BitwiseOr(mask1, mask2, &mask)
+
+	filtered := gocv.NewMat()
+	defer filtered.Close()
+	gocv.GaussianBlur(mask, &filtered, image.Point{X: BlackMarkParams.GaussianBlurKernel, Y: BlackMarkParams.GaussianBlurKernel}, BlackMarkParams.GaussianBlurSigma, BlackMarkParams.GaussianBlurSigma, gocv.BorderDefault)
+
+	debugInfo.GaussianBlur = GaussianBlur{
+		KernelSize: Point{X: BlackMarkParams.GaussianBlurKernel, Y: BlackMarkParams.GaussianBlurKernel},
+		SigmaX:     BlackMarkParams.GaussianBlurSigma,
+		SigmaY:     BlackMarkParams.GaussianBlurSigma,
+	}
+
+	kernelSize := BlackMarkParams.MorphKernelSize
+
+	debugInfo.Morphology = Morphology{
+		KernelSize: Point{X: kernelSize, Y: kernelSize},
+		KernelType: "Ellipse",
+		Operation:  "Close",
+	}
+
+	kernel := gocv.GetStructuringElement(gocv.MorphEllipse, image.Point{X: kernelSize, Y: kernelSize})
+	defer kernel.Close()
+
+	// 先进行开操作去除噪声，再进行闭操作填充小洞
+	opened := gocv.NewMat()
+	defer opened.Close()
+	gocv.MorphologyEx(filtered, &opened, gocv.MorphOpen, kernel)
+
+	closed := gocv.NewMat()
+	defer closed.Close()
+	gocv.MorphologyEx(opened, &closed, gocv.MorphClose, kernel)
+
+	contours := gocv.FindContours(closed, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+
+	debugInfo.ContourInfo.TotalContours = contours.Size()
+
+	debugInfo.ContourInfo.MinArea = BlackMarkParams.MinArea
+	debugInfo.ContourInfo.MaxArea = BlackMarkParams.MaxArea
+	debugInfo.ContourInfo.MinAspectRatio = 0
+	debugInfo.ContourInfo.MaxAspectRatio = BlackMarkParams.MaxAspectRatio
+
+	if contours.Size() == 0 {
+		debugInfo.ErrorMessage = "HSV_Optimized: 未找到角标"
+	} else {
+		bestIdx := -1
+		bestScore := 0.0
+		validCount := 0
+
+		for i := 0; i < contours.Size(); i++ {
+			contour := contours.At(i)
+			area := gocv.ContourArea(contour)
+
+			if area < BlackMarkParams.MinArea || area > BlackMarkParams.MaxArea {
+				continue
+			}
+
+			validCount++
+
+			rect := gocv.BoundingRect(contour)
+			w, h := rect.Dx(), rect.Dy()
+
+			if w == 0 || h == 0 {
+				continue
+			}
+
+			ratio := math.Max(float64(w), float64(h)) / math.Min(float64(w), float64(h))
+			if ratio > BlackMarkParams.MaxAspectRatio {
+				continue
+			}
+
+			perimeter := gocv.ArcLength(contour, true)
+			if perimeter == 0 {
+				continue
+			}
+
+			circularity := (4 * math.Pi * area) / (perimeter * perimeter)
+
+			// 计算solidity (坚实度) = 轮廓面积 / 边界矩形面积
+			solidity := 0.0
+			if perimeter > 0 {
+				solidity = area / float64(w*h)
+			}
+
+			// 综合考虑多个特征
+			score := area * (8.0 - ratio) * (circularity + 0.3) * (solidity + 0.5)
+
+			if score > bestScore {
+				bestScore = score
+				bestIdx = i
+			}
+		}
+
+		debugInfo.ContourInfo.ValidContours = validCount
+
+		// 如果没有找到合适的轮廓，尝试使用最大面积的轮廓
+		if bestIdx == -1 && contours.Size() > 0 {
+			bestIdx = 0
+			maxArea := gocv.ContourArea(contours.At(0))
+			for i := 1; i < contours.Size(); i++ {
+				currentArea := gocv.ContourArea(contours.At(i))
+				if currentArea > maxArea {
+					maxArea = currentArea
+					bestIdx = i
+				}
+			}
+		}
+
+		if bestIdx == -1 {
+			debugInfo.ErrorMessage = "HSV_Optimized: 未找到有效的角标轮廓"
+		} else {
+			debugInfo.Success = true
+
+			bestContour := contours.At(bestIdx)
+			rect := gocv.BoundingRect(bestContour)
+			area := gocv.ContourArea(bestContour)
+			perimeter := gocv.ArcLength(bestContour, true)
+			circularity := (4 * math.Pi * area) / (perimeter * perimeter)
+			w, h := rect.Dx(), rect.Dy()
+			ratio := math.Max(float64(w), float64(h)) / math.Min(float64(w), float64(h))
+
+			debugInfo.SelectedContour = SelectedContour{
+				Index:       bestIdx,
+				Area:        area,
+				Perimeter:   perimeter,
+				Circularity: circularity,
+				AspectRatio: ratio,
+				Score:       bestScore,
+				Bounds: Rect{
+					Min: Point{X: rect.Min.X, Y: rect.Min.Y},
+					Max: Point{X: rect.Max.X, Y: rect.Max.Y},
+				},
+			}
+
+			centerX := float64(rect.Min.X + rect.Dx()/2)
+			centerY := float64(rect.Min.Y + rect.Dy()/2)
+
+			debugInfo.FinalMarkPoint = Point{
+				X: int(math.Round(centerX)),
+				Y: int(math.Round(centerY)),
+			}
+
+			grid := CalculateGrid(img)
+			minDist := math.MaxFloat64
+			bestCol, bestRow := 0, 0
+
+			for colIdx := 0; colIdx < 19; colIdx++ {
+				for rowIdx := 0; rowIdx < 19; rowIdx++ {
+					pt := grid.Grid[colIdx][rowIdx]
+					dist := math.Hypot(float64(debugInfo.FinalMarkPoint.X-pt.X), float64(debugInfo.FinalMarkPoint.Y-pt.Y))
+					if dist < minDist {
+						minDist = dist
+						bestCol, bestRow = colIdx, rowIdx
+					}
+				}
+			}
+
+			withinThreshold := minDist <= BlackMarkParams.MaxGridDistanceRatio*gridSpacing
+
+			debugInfo.StoneVerification = StoneVerification{
+				GridDistance:    minDist,
+				WithinThreshold: withinThreshold,
+				ExpectedColor:   "black",
+				Verified:        false,
+			}
+
+			if withinThreshold {
+				gridPt := grid.Grid[bestCol][bestRow]
+				roiSize := int(BlackMarkParams.MaxGridDistanceRatio * gridSpacing)
+				roiRect := image.Rect(
+					max(0, gridPt.X-roiSize),
+					max(0, gridPt.Y-roiSize),
+					min(img.Cols(), gridPt.X+roiSize),
+					min(img.Rows(), gridPt.Y+roiSize),
+				)
+
+				roi := img.Region(roiRect)
+				defer roi.Close()
+
+				meanMat := gocv.NewMat()
+				defer meanMat.Close()
+				stddevMat := gocv.NewMat()
+				defer stddevMat.Close()
+				gocv.MeanStdDev(roi, &meanMat, &stddevMat)
+
+				b := meanMat.GetDoubleAt(0, 0)
+				g := meanMat.GetDoubleAt(1, 0)
+				r := meanMat.GetDoubleAt(2, 0)
+				brightness := (b + g + r) / 3.0
+
+				debugInfo.StoneVerification.Brightness = brightness
+				debugInfo.StoneVerification.Verified = brightness <= BlackMarkParams.MaxBrightness
+			}
+		}
+	}
+
+	outputPath := filepath.Join(outputDir, "black_mark_debug.json")
+	data, err := json.MarshalIndent(debugInfo, "", "  ")
+	if err != nil {
+		return fmt.Errorf("JSON编码失败: %v", err)
+	}
+
+	return os.WriteFile(outputPath, data, 0644)
 }
 
 func NewDetector(b *board.Board) *Detector {
@@ -1686,23 +2218,6 @@ func (d *Detector) DetectLatestMove(img gocv.Mat) (int, int, int, string) {
 			latestRow, latestCol = bestMove.row, bestMove.col
 		}
 	}
-
-	// 4. 如果没找到标记，退而求其次找状态变化
-	if latestRow == -1 {
-		for r := 0; r < 19; r++ {
-			for c := 0; c < 19; c++ {
-				if currentBoard[r][c] != ColorNone && currentBoard[r][c] != d.LastBoardState[r][c] {
-					// 如果 OCR 确定了颜色，必须匹配
-					if expectedColor != ColorNone && currentBoard[r][c] != expectedColor {
-						continue
-					}
-					latestRow, latestCol = r, c
-					goto found
-				}
-			}
-		}
-	}
-found:
 
 	// 5. 更新状态
 	d.LastBoardState = currentBoard
@@ -2029,9 +2544,9 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 
 	// 1. 定义检测区域：聚焦于棋子的左上角部分
 	// 腾讯围棋的标记通常在棋子边缘，偏移中心点往左上移动
-	regionSize := 10
-	offsetX := -6
-	offsetY := -6
+	regionSize := 12
+	offsetX := -8
+	offsetY := -8
 	rect := image.Rect(center.X+offsetX-regionSize, center.Y+offsetY-regionSize, center.X+offsetX+regionSize, center.Y+offsetY+regionSize)
 
 	if rect.Min.X < 0 || rect.Min.Y < 0 || rect.Max.X > img.Cols() || rect.Max.Y > img.Rows() {
@@ -2051,10 +2566,10 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 
 	if stoneColor == ColorBlack {
 		// 检测红色标记 (黑棋)
-		lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(0, 100, 100, 0), gocv.MatTypeCV8UC3)
-		upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(10, 255, 255, 0), gocv.MatTypeCV8UC3)
-		lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(160, 100, 100, 0), gocv.MatTypeCV8UC3)
-		upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(180, 255, 255, 0), gocv.MatTypeCV8UC3)
+		lowerRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed1H, BlackMarkParams.LowerRed1S, BlackMarkParams.LowerRed1V, 0), gocv.MatTypeCV8UC3)
+		upperRed1 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed1H, BlackMarkParams.UpperRed1S, BlackMarkParams.UpperRed1V, 0), gocv.MatTypeCV8UC3)
+		lowerRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerRed2H, BlackMarkParams.LowerRed2S, BlackMarkParams.LowerRed2V, 0), gocv.MatTypeCV8UC3)
+		upperRed2 := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperRed2H, BlackMarkParams.UpperRed2S, BlackMarkParams.UpperRed2V, 0), gocv.MatTypeCV8UC3)
 		defer lowerRed1.Close()
 		defer upperRed1.Close()
 		defer lowerRed2.Close()
@@ -2069,8 +2584,8 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 		gocv.BitwiseOr(m1, m2, &mask)
 	} else if stoneColor == ColorWhite {
 		// 检测蓝色标记 (白棋)
-		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(100, 150, 50, 0), gocv.MatTypeCV8UC3)
-		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(140, 255, 255, 0), gocv.MatTypeCV8UC3)
+		lowerBlue := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.LowerBlueH, BlackMarkParams.LowerBlueS, BlackMarkParams.LowerBlueV, 0), gocv.MatTypeCV8UC3)
+		upperBlue := gocv.NewMatFromScalar(gocv.NewScalar(BlackMarkParams.UpperBlueH, BlackMarkParams.UpperBlueS, BlackMarkParams.UpperBlueV, 0), gocv.MatTypeCV8UC3)
 		defer lowerBlue.Close()
 		defer upperBlue.Close()
 		gocv.InRange(hsv, lowerBlue, upperBlue, &mask)
@@ -2081,11 +2596,10 @@ func (d *Detector) CalculateCenterComplexity(img gocv.Mat, center image.Point, s
 	totalPixels := mask.Rows() * mask.Cols()
 	ratio := float64(activePixels) / float64(totalPixels)
 
-	// 如果标记颜色比例足够高，判定为最新落点
-	if ratio > 0.1 {
-		return 2000.0 + ratio*1000.0 // 极高分值
+	// 如果像素点超过一定数量（比如10个像素）且比例超过3%即可认为是角标
+	if activePixels > 8 && ratio > 0.03 {
+		return 3000.0 + ratio*1000.0
 	}
-
 	// 4. 备选方案：计算灰度标准差 (寻找可能存在的数字或其他变化)
 	grayROI := gocv.NewMat()
 	defer grayROI.Close()

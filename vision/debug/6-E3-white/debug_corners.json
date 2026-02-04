@@ -19,5 +19,28 @@
   ],
   "imgHeight": 2670,
   "imgWidth": 1200,
+  "mapped_grid": {
+    "col": 4,
+    "row": 2
+  },
+  "mapping_confidence": 0,
+  "mark_cell": {
+    "Min": {
+      "X": 199,
+      "Y": 84
+    },
+    "Max": {
+      "X": 255,
+      "Y": 140
+    }
+  },
+  "mark_point": {
+    "X": 227,
+    "Y": 112
+  },
+  "mark_rb": {
+    "X": 255,
+    "Y": 140
+  },
   "resKey": "1200x2670"
 }
