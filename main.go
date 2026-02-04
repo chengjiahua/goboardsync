@@ -73,7 +73,7 @@ func monitorLoop() {
 			if err == nil {
 				mat, err := gocv.ImageToMatRGB(img)
 				if err == nil {
-					row, col := detector.DetectMove(mat)
+					row, col, _, _ := detector.DetectLatestMove(mat)
 					if row != -1 && col != -1 {
 						fmt.Printf("检测到新落子: [%d, %d]\n", row, col)
 						syncCtrl.SyncMove(row, col)
