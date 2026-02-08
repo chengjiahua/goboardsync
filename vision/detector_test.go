@@ -69,6 +69,16 @@ func TestBatchRecognition(t *testing.T) {
 	}
 }
 
+func TestPrintBatchStats(t *testing.T) {
+	imagesDir := "../images"
+	stats, details, err := BatchRecognizeImages(imagesDir)
+	if err != nil {
+		t.Fatalf("批量识别失败: %v", err)
+	}
+
+	PrintBatchRecognitionStats(stats, details)
+}
+
 func drawGrid(img gocv.Mat) {
 	w, h := img.Cols(), img.Rows()
 	stepW, stepH := float64(w)/19.0, float64(h)/19.0
@@ -111,14 +121,16 @@ type BatchStats struct {
 
 // BatchDetail 批量识别详细信息
 type BatchDetail struct {
-	Filename  string  `json:"filename"`
-	Success   bool    `json:"success"`
-	Result    Result  `json:"result"`
-	Error     string  `json:"error,omitempty"`
-	ExpectedX int     `json:"expected_x"`
-	ExpectedY int     `json:"expected_y"`
-	ImageSize string  `json:"image_size"`
-	Distance  float64 `json:"distance"`
+	Filename      string  `json:"filename"`
+	Success       bool    `json:"success"`
+	Result        Result  `json:"result"`
+	Error         string  `json:"error,omitempty"`
+	ExpectedX     int     `json:"expected_x"`
+	ExpectedY     int     `json:"expected_y"`
+	ExpectedMove  int     `json:"expected_move"`
+	ExpectedColor string  `json:"expected_color"`
+	ImageSize     string  `json:"image_size"`
+	Distance      float64 `json:"distance"`
 }
 
 // BatchRecognizeImages 批量识别图像
@@ -181,13 +193,15 @@ func BatchRecognizeImages(imagesDir string) (*BatchStats, []BatchDetail, error) 
 		success := result.X > 0 && result.Y > 0 && result.Color == color && distance < 0.5
 
 		details = append(details, BatchDetail{
-			Filename:  filename,
-			Success:   success,
-			Result:    result,
-			ExpectedX: expectedX,
-			ExpectedY: expectedY,
-			ImageSize: imageSize,
-			Distance:  distance,
+			Filename:      filename,
+			Success:       success,
+			Result:        result,
+			ExpectedX:     expectedX,
+			ExpectedY:     expectedY,
+			ExpectedMove:  moveNumber,
+			ExpectedColor: color,
+			ImageSize:     imageSize,
+			Distance:      distance,
 		})
 
 		stats.TotalCount++
@@ -212,22 +226,36 @@ func BatchRecognizeImages(imagesDir string) (*BatchStats, []BatchDetail, error) 
 
 // PrintBatchRecognitionStats 打印批量识别统计结果
 func PrintBatchRecognitionStats(stats *BatchStats, details []BatchDetail) {
-	fmt.Println("\n" + strings.Repeat("-", 104))
-	fmt.Printf("%-30s | %-15s | %-15s | %-10s | %-10s | %s\n", "文件名", "预期结果", "检测结果", "图像尺寸", "置信度", "状态")
-	fmt.Println(strings.Repeat("-", 104))
+	fmt.Println("\n" + strings.Repeat("-", 105))
+	fmt.Printf("%-30s | %-18s | %-18s | %-10s | %-10s | %s\n", "文件名", "预期结果", "检测结果", "图像尺寸", "置信度", "状态")
+	fmt.Println(strings.Repeat("-", 105))
 
 	var totalDistance float64
 	var maxDistance float64
 	var minDistance float64 = math.MaxFloat64
+	var errorCount int
 
 	for _, detail := range details {
-		expectedCoord := fmt.Sprintf("%d-%s", detail.Result.Move, detail.Result.Color)
-		detectedCoord := fmt.Sprintf("%d-%s", detail.Result.Move, detail.Result.Color)
-		if detail.Result.X > 0 && detail.Result.Y > 0 {
+		// 预期结果格式: {move}-{coord}-{color} 如: 59-F15-black
+		expectedCoord := fmt.Sprintf("X0-black")
+		if detail.ExpectedX > 0 && detail.ExpectedY > 0 {
+			colorChar := "black"
+			if strings.ToLower(detail.ExpectedColor) == "w" {
+				colorChar = "white"
+			}
 			xChar := string(rune('A' + detail.ExpectedX - 1))
-			expectedCoord = fmt.Sprintf("%d-%s%d", detail.Result.Move, xChar, detail.ExpectedY)
-			detectedXChar := string(rune('A' + detail.Result.X - 1))
-			detectedCoord = fmt.Sprintf("%d-%s%d", detail.Result.Move, detectedXChar, detail.Result.Y)
+			expectedCoord = fmt.Sprintf("%d-%s%d-%s", detail.ExpectedMove, xChar, detail.ExpectedY, colorChar)
+		}
+
+		// 检测结果格式: {move}-{coord}-{color} 如: 59-F15-black
+		detectedCoord := fmt.Sprintf("X0-black")
+		if detail.Result.X > 0 && detail.Result.Y > 0 {
+			colorChar := "black"
+			if strings.ToLower(detail.Result.Color) == "w" {
+				colorChar = "white"
+			}
+			xChar := string(rune('A' + detail.Result.X - 1))
+			detectedCoord = fmt.Sprintf("%d-%s%d-%s", detail.Result.Move, xChar, detail.Result.Y, colorChar)
 		}
 
 		status := "✅ 正确"
@@ -235,14 +263,15 @@ func PrintBatchRecognitionStats(stats *BatchStats, details []BatchDetail) {
 			status = "❌ 错误"
 		}
 
-		fmt.Printf("%-30s | %-15s | %-15s | %-10s | %-10.2f | %s\n",
+		fmt.Printf("%-30s | %-18s | %-18s | %-10s | %-10.2f | %s\n",
 			detail.Filename, expectedCoord, detectedCoord, detail.ImageSize, detail.Result.Confidence, status)
 
 		if !detail.Success {
 			fmt.Printf("   -> 坐标误差: %.2f\n", detail.Distance)
 		}
 
-		if detail.Result.X > 0 && detail.Result.Y > 0 {
+		if detail.Distance > 0 {
+			errorCount++
 			totalDistance += detail.Distance * detail.Distance
 			if detail.Distance > maxDistance {
 				maxDistance = detail.Distance
@@ -253,25 +282,21 @@ func PrintBatchRecognitionStats(stats *BatchStats, details []BatchDetail) {
 		}
 	}
 
-	fmt.Println(strings.Repeat("-", 104))
+	fmt.Println(strings.Repeat("-", 105))
 	fmt.Printf("测试总结: 总计 %d, 成功 %d, 失败 %d, 成功率 %.2f%%\n",
 		stats.TotalCount, stats.SuccessCount, stats.FailureCount, stats.SuccessRate)
-	fmt.Println(strings.Repeat("-", 104))
+	fmt.Println(strings.Repeat("-", 105))
 
-	if stats.TotalCount > 0 {
-		mse := totalDistance / float64(stats.TotalCount)
+	if errorCount > 0 {
+		mse := totalDistance / float64(errorCount)
 		rmse := math.Sqrt(mse)
 
 		fmt.Println("误差统计:")
-		fmt.Printf("总误差数量: %d\n", stats.TotalCount)
+		fmt.Printf("总误差数量: %d\n", errorCount)
 		fmt.Printf("均方误差 (MSE): %.2f\n", mse)
 		fmt.Printf("均方根误差 (RMSE): %.2f\n", rmse)
-		if maxDistance > 0 {
-			fmt.Printf("最大误差: %.2f\n", maxDistance)
-		}
-		if minDistance < math.MaxFloat64 {
-			fmt.Printf("最小误差: %.2f\n", minDistance)
-		}
+		fmt.Printf("最大误差: %.2f\n", maxDistance)
+		fmt.Printf("最小误差: %.2f\n", minDistance)
 	}
 }
 
