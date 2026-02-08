@@ -1,0 +1,16 @@
+{
+  "color": "W",
+  "confidence": 0.8,
+  "debug": {
+    "board_localization_method": "fixed",
+    "final_status": "success",
+    "fixed_resolution": "1200x2670",
+    "image_size": "1200x2670",
+    "move_number": 12,
+    "step": "board_localization"
+  },
+  "filename": "12-C7-white.jpg",
+  "move_number": 12,
+  "x": 3,
+  "y": 7
+}
