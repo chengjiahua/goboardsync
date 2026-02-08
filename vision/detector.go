@@ -19,26 +19,29 @@ import (
 const (
 	// BoardWarpSize 棋盘矫正后的大小
 	BoardWarpSize = 1024
+	// BoardMargin 棋盘向外扩展的边距（像素），用于确保边缘棋子完整显示
+	BoardMargin = 30
 )
 
 // FixedBoardCorners 为常见分辨率预定义的棋盘四角（按顺时针或逆时针顺序）
 var FixedBoardCorners = map[string][]image.Point{
 	"1200x2670": {
-		{40, 536},
-		{1160, 536},
-		{1160, 1650},
-		{40, 1650},
+		{10, 506},
+		{1190, 506},
+		{1190, 1680},
+		{10, 1680},
 	},
 }
 
 // Result 识别结果结构
 type Result struct {
-	Move       int            `json:"move"`
-	Color      string         `json:"color"` // "W" or "B"
-	X          int            `json:"x"`     // 1..19
-	Y          int            `json:"y"`     // 1..19
-	Confidence float64        `json:"confidence"`
-	Debug      map[string]any `json:"debug"`
+	Move       int             `json:"move"`
+	Color      string          `json:"color"` // "W" or "B"
+	X          int             `json:"x"`     // 1..19
+	Y          int             `json:"y"`     // 1..19
+	Confidence float64         `json:"confidence"`
+	MarkerRect image.Rectangle `json:"marker_rect"` // 保存检测到的标记位置
+	Debug      map[string]any  `json:"debug"`
 }
 
 // Detector 检测器结构体
@@ -175,6 +178,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 	var corners []image.Point
 	var color string
 	var gridX, gridY int
+	var markerRect image.Rectangle
 	var err error
 
 	debugInfo["step"] = "board_localization"
@@ -212,7 +216,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 
 	isBlack := moveNumber%2 == 1
 	if isBlack {
-		gridX, gridY, err = boardblack(warped)
+		markerRect, gridX, gridY, err = boardblack(warped)
 		if err != nil {
 			debugInfo["detection_error"] = err.Error()
 			debugInfo["final_status"] = "failed_at_detection"
@@ -222,12 +226,13 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 				X:          0,
 				Y:          0,
 				Confidence: 0,
+				MarkerRect: markerRect,
 				Debug:      debugInfo,
 			}, nil
 		}
 		color = "B"
 	} else {
-		gridX, gridY, err = boardwhite(warped)
+		markerRect, gridX, gridY, err = boardwhite(warped)
 		if err != nil {
 			debugInfo["detection_error"] = err.Error()
 			debugInfo["final_status"] = "failed_at_detection"
@@ -237,6 +242,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 				X:          0,
 				Y:          0,
 				Confidence: 0,
+				MarkerRect: markerRect,
 				Debug:      debugInfo,
 			}, nil
 		}
@@ -250,72 +256,54 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 		X:          gridX + 1,
 		Y:          gridY + 1,
 		Confidence: 0.8,
+		MarkerRect: markerRect,
 		Debug:      debugInfo,
 	}
 
 	return result, nil
 }
 
+// calculateGrid 根据标记矩形计算网格坐标和中心点
+func calculateGrid(markerRect image.Rectangle, width, height int) (int, int, image.Point) {
+	margin := float64(BoardMargin)
+
+	effectiveW := float64(width) - (margin * 2)
+	effectiveH := float64(height) - (margin * 2)
+
+	cellW := effectiveW / 18.0
+	cellH := effectiveH / 18.0
+
+	centerX := float64(markerRect.Min.X+markerRect.Max.X) / 2.0
+	centerY := float64(markerRect.Min.Y+markerRect.Max.Y) / 2.0
+
+	gridX := int(math.Round((centerX - margin) / cellW))
+	gridY := int(math.Round((centerY - margin) / cellH))
+
+	return clamp(gridX, 0, 18), clamp(gridY, 0, 18), image.Pt(int(centerX), int(centerY))
+}
+
 // boardblack 识别黑棋
-func boardblack(img gocv.Mat) (int, int, error) {
-	// 使用统一的角标检测函数
+func boardblack(img gocv.Mat) (image.Rectangle, int, int, error) {
 	markerRect, found := findLastMoveMarker(img)
 	if !found {
-		return 0, 0, fmt.Errorf("未找到红色最后一手标记")
+		return image.Rectangle{}, 0, 0, fmt.Errorf("未找到红色最后一手标记")
 	}
 
-	// 计算格子大小
-	width := float64(img.Cols())
-	height := float64(img.Rows())
-	cellW := width / 19.0
-	cellH := height / 19.0
+	gridX, gridY, _ := calculateGrid(markerRect, img.Cols(), img.Rows())
 
-	// 半径偏移：角标左上角 + 半径 = 棋子中心点
-	radiusW := cellW / 2.0
-	radiusH := cellH / 2.0
-	centerX := float64(markerRect.Min.X) + radiusW
-	centerY := float64(markerRect.Min.Y) + radiusH
-
-	// 直接使用Floor取整索引
-	gridX := int(math.Floor(centerX / cellW))
-	gridY := int(math.Floor(centerY / cellH))
-
-	// 边界限制：确保坐标在0-18范围内
-	gridX = clamp(gridX, 0, 18)
-	gridY = clamp(gridY, 0, 18)
-
-	return gridX, gridY, nil
+	return markerRect, gridX, gridY, nil
 }
 
 // boardwhite 识别白棋
-func boardwhite(img gocv.Mat) (int, int, error) {
-	// 使用统一的角标检测函数
+func boardwhite(img gocv.Mat) (image.Rectangle, int, int, error) {
 	markerRect, found := findLastMoveMarker(img)
 	if !found {
-		return 0, 0, fmt.Errorf("未检测到蓝色角标")
+		return image.Rectangle{}, 0, 0, fmt.Errorf("未检测到蓝色角标")
 	}
 
-	// 计算格子大小
-	width := float64(img.Cols())
-	height := float64(img.Rows())
-	cellW := width / 19.0
-	cellH := height / 19.0
+	gridX, gridY, _ := calculateGrid(markerRect, img.Cols(), img.Rows())
 
-	// 半径偏移：角标左上角 + 半径 = 棋子中心点
-	radiusW := cellW / 2.0
-	radiusH := cellH / 2.0
-	centerX := float64(markerRect.Min.X) + radiusW
-	centerY := float64(markerRect.Min.Y) + radiusH
-
-	// 直接使用Floor取整索引
-	gridX := int(math.Floor(centerX / cellW))
-	gridY := int(math.Floor(centerY / cellH))
-
-	// 边界限制：确保坐标在0-18范围内
-	gridX = clamp(gridX, 0, 18)
-	gridY = clamp(gridY, 0, 18)
-
-	return gridX, gridY, nil
+	return markerRect, gridX, gridY, nil
 }
 
 // findBoardRect 寻找图片中的棋盘矩形区域

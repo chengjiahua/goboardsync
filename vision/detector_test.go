@@ -2,6 +2,8 @@ package vision
 
 import (
 	"fmt"
+	"image"
+	"image/color"
 	"math"
 	"os"
 	"path/filepath"
@@ -14,19 +16,86 @@ import (
 
 func TestBatchRecognition(t *testing.T) {
 	imagesDir := "../images"
+	debugBaseDir := "debug"
+	os.RemoveAll(debugBaseDir)
 
-	// 调用 detector 的批量识别方法
-	stats, details, err := BatchRecognizeImages(imagesDir)
-	if err != nil {
-		t.Fatalf("批量识别失败: %v", err)
+	files, _ := os.ReadDir(imagesDir)
+	for _, file := range files {
+		if file.IsDir() || !strings.HasSuffix(file.Name(), ".jpg") {
+			continue
+		}
+
+		filename := file.Name()
+		caseDir := filepath.Join(debugBaseDir, strings.TrimSuffix(filename, filepath.Ext(filename)))
+		os.MkdirAll(caseDir, 0755)
+
+		img := gocv.IMRead(filepath.Join(imagesDir, filename), gocv.IMReadColor)
+		if img.Empty() {
+			continue
+		}
+		defer img.Close()
+
+		moveNum, _, expX, expY, _ := parseFilename(filename)
+
+		corners := FixedBoardCorners["1200x2670"]
+		warped, _ := WarpBoard(img, corners)
+		defer warped.Close()
+
+		result, _ := DetectLastMoveCoord(img, moveNum)
+
+		drawGrid(warped)
+
+		gocv.Rectangle(&warped, result.MarkerRect, colorToScalar("yellow"), 2)
+
+		gocv.Circle(&warped, result.MarkerRect.Min, 5, colorToScalar("green"), -1)
+
+		cellW := float64(warped.Cols()) / 19.0
+		cellH := float64(warped.Rows()) / 19.0
+		centerPt := image.Pt(
+			int(float64(result.MarkerRect.Min.X)+cellW/2.0),
+			int(float64(result.MarkerRect.Min.Y)+cellH/2.0),
+		)
+		gocv.Circle(&warped, centerPt, 8, colorToScalar("red"), 2)
+
+		info := fmt.Sprintf("Exp: %c%d, Got: %c%d", 'A'+expX-1, expY, 'A'+result.X-1, result.Y)
+		gocv.PutText(&warped, info, image.Pt(20, 50), gocv.FontHersheySimplex, 1.2, colorToScalar("purple"), 3)
+
+		debugPath := filepath.Join(caseDir, "debug_warped.jpg")
+		gocv.IMWrite(debugPath, warped)
+
+		if result.X != expX || result.Y != expY {
+			fmt.Printf("错误样本已记录: %s\n", filename)
+		}
 	}
+}
 
-	// 打印统计结果
-	PrintBatchRecognitionStats(stats, details)
+func drawGrid(img gocv.Mat) {
+	w, h := img.Cols(), img.Rows()
+	stepW, stepH := float64(w)/19.0, float64(h)/19.0
+	gray := colorToScalar("gray")
 
-	// 如果需要在测试中验证结果，可以添加断言
-	if stats.TotalCount == 0 {
-		t.Skip("没有找到测试图像")
+	for i := 0; i < 19; i++ {
+		y := int(float64(i)*stepH + stepH/2)
+		gocv.Line(&img, image.Pt(0, y), image.Pt(w, y), gray, 1)
+		x := int(float64(i)*stepW + stepW/2)
+		gocv.Line(&img, image.Pt(x, 0), image.Pt(x, h), gray, 1)
+	}
+}
+
+func colorToScalar(name string) color.RGBA {
+	switch name {
+	case "red":
+		return color.RGBA{0, 0, 255, 0}
+	case "green":
+		return color.RGBA{0, 255, 0, 0}
+	case "yellow":
+		return color.RGBA{0, 255, 255, 0}
+	case "purple":
+		return color.RGBA{255, 0, 255, 0}
+	case "gray":
+		return color.RGBA{200, 200, 200, 0}
+	default:
+		return color.RGBA{255, 255, 255, 0}
 	}
 }
 
