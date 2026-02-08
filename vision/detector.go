@@ -5,16 +5,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
-	"image/color"
 	"io"
 	"math"
 	"mime/multipart"
 	"net/http"
-	"os"
-	"path/filepath"
 	"regexp"
 	"strconv"
-	"strings"
 	"time"
 
 	"gocv.io/x/gocv"
@@ -172,21 +168,18 @@ func WarpBoard(img gocv.Mat, corners []image.Point) (gocv.Mat, error) {
 
 // DetectLastMoveCoord 检测最后一手的坐标
 func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
-	// 初始化详细的调试信息
 	debugInfo := make(map[string]any)
 	debugInfo["image_size"] = fmt.Sprintf("%dx%d", img.Cols(), img.Rows())
 	debugInfo["move_number"] = moveNumber
 
-	// 声明corners变量
 	var corners []image.Point
+	var color string
+	var gridX, gridY int
+	var err error
 
-	// 1. 棋盘定位与矫正
 	debugInfo["step"] = "board_localization"
-
-	// 使用固定的棋盘位置，基于用户提供的截图
 	debugInfo["board_localization_method"] = "fixed"
 
-	// 使用全局预定义的硬编码棋盘区域，保证调试输出与实际使用一致
 	resKey := fmt.Sprintf("%dx%d", img.Cols(), img.Rows())
 	if c, ok := FixedBoardCorners[resKey]; ok {
 		corners = c
@@ -202,12 +195,10 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 		}, fmt.Errorf("不支持的图片分辨率: %dx%d，请添加硬编码的棋盘区域", img.Cols(), img.Rows())
 	}
 
-	// 2. 透视矫正
 	warped, err := WarpBoard(img, corners)
 	if err != nil {
 		debugInfo["warp_error"] = err.Error()
 		debugInfo["final_status"] = "failed_at_warp"
-		// 透视矫正失败，返回默认结果
 		return Result{
 			Move:       moveNumber,
 			Color:      "B",
@@ -219,42 +210,46 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 	}
 	defer warped.Close()
 
-	// 3. 识别黑白棋
-	var color string
-	var gridX, gridY int
-
 	isBlack := moveNumber%2 == 1
 	if isBlack {
-		// 识别黑棋
 		gridX, gridY, err = boardblack(warped)
+		if err != nil {
+			debugInfo["detection_error"] = err.Error()
+			debugInfo["final_status"] = "failed_at_detection"
+			return Result{
+				Move:       moveNumber,
+				Color:      "B",
+				X:          0,
+				Y:          0,
+				Confidence: 0,
+				Debug:      debugInfo,
+			}, nil
+		}
 		color = "B"
 	} else {
-		// 识别白棋
 		gridX, gridY, err = boardwhite(warped)
+		if err != nil {
+			debugInfo["detection_error"] = err.Error()
+			debugInfo["final_status"] = "failed_at_detection"
+			return Result{
+				Move:       moveNumber,
+				Color:      "W",
+				X:          0,
+				Y:          0,
+				Confidence: 0,
+				Debug:      debugInfo,
+			}, nil
+		}
 		color = "W"
 	}
 
-	if err != nil {
-		debugInfo["detection_error"] = err.Error()
-		debugInfo["final_status"] = "failed_at_detection"
-		return Result{
-			Move:       moveNumber,
-			Color:      color,
-			X:          0,
-			Y:          0,
-			Confidence: 0,
-			Debug:      debugInfo,
-		}, nil
-	}
-
-	// 4. 构建结果
 	debugInfo["final_status"] = "success"
 	result := Result{
 		Move:       moveNumber,
 		Color:      color,
-		X:          gridX + 1, // 转换为 1-based
-		Y:          gridY + 1, // 转换为 1-based
-		Confidence: 0.8,       // 固定置信度
+		X:          gridX + 1,
+		Y:          gridY + 1,
+		Confidence: 0.8,
 		Debug:      debugInfo,
 	}
 
@@ -263,75 +258,29 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 
 // boardblack 识别黑棋
 func boardblack(img gocv.Mat) (int, int, error) {
-	// 2. 转换到 HSV 颜色空间
-	hsv := gocv.NewMat()
-	defer hsv.Close()
-	gocv.CvtColor(img, &hsv, gocv.ColorBGRToHSV)
-
-	// 定义红色范围 (HSV)
-	// 红色在 HSV 中分布在两端，需要两个范围
-	lower1 := gocv.NewScalar(0, 150, 150, 0)
-	upper1 := gocv.NewScalar(10, 255, 255, 0)
-	lower2 := gocv.NewScalar(160, 150, 150, 0)
-	upper2 := gocv.NewScalar(180, 255, 255, 0)
-
-	// 创建用于 InRange 的边界 Mat
-	l1 := gocv.NewMatWithSizeFromScalar(lower1, hsv.Rows(), hsv.Cols(), hsv.Type())
-	u1 := gocv.NewMatWithSizeFromScalar(upper1, hsv.Rows(), hsv.Cols(), hsv.Type())
-	l2 := gocv.NewMatWithSizeFromScalar(lower2, hsv.Rows(), hsv.Cols(), hsv.Type())
-	u2 := gocv.NewMatWithSizeFromScalar(upper2, hsv.Rows(), hsv.Cols(), hsv.Type())
-	defer l1.Close()
-	defer u1.Close()
-	defer l2.Close()
-	defer u2.Close()
-
-	mask1 := gocv.NewMat()
-	mask2 := gocv.NewMat()
-	mask := gocv.NewMat()
-	defer mask1.Close()
-	defer mask2.Close()
-	defer mask.Close()
-
-	// 过滤颜色
-	gocv.InRange(hsv, l1, u1, &mask1)
-	gocv.InRange(hsv, l2, u2, &mask2)
-	gocv.BitwiseOr(mask1, mask2, &mask)
-
-	// 3. 寻找红色区域的轮廓
-	contours := gocv.FindContours(mask, gocv.RetrievalExternal, gocv.ChainApproxSimple)
-	defer contours.Close()
-
-	if contours.Size() == 0 {
+	// 使用统一的角标检测函数
+	markerRect, found := findLastMoveMarker(img)
+	if !found {
 		return 0, 0, fmt.Errorf("未找到红色最后一手标记")
 	}
 
-	// 找到最大的红色区域（角标）
-	var maxArea float64
-	var bestRect image.Rectangle
-	for i := 0; i < contours.Size(); i++ {
-		area := gocv.ContourArea(contours.At(i))
-		if area > maxArea {
-			maxArea = area
-			bestRect = gocv.BoundingRect(contours.At(i))
-		}
-	}
+	// 计算格子大小
+	width := float64(img.Cols())
+	height := float64(img.Rows())
+	cellW := width / 19.0
+	cellH := height / 19.0
 
-	// 计算红色角标的中心位置
-	indicatorX := float64(bestRect.Min.X+bestRect.Max.X) / 2.0
-	indicatorY := float64(bestRect.Min.Y+bestRect.Max.Y) / 2.0
+	// 半径偏移：角标左上角 + 半径 = 棋子中心点
+	radiusW := cellW / 2.0
+	radiusH := cellH / 2.0
+	centerX := float64(markerRect.Min.X) + radiusW
+	centerY := float64(markerRect.Min.Y) + radiusH
 
-	// 4. 将像素坐标映射到 19x19 网格
-	rows, cols := img.Rows(), img.Cols()
+	// 直接使用Floor取整索引
+	gridX := int(math.Floor(centerX / cellW))
+	gridY := int(math.Floor(centerY / cellH))
 
-	// 棋盘格子的平均宽度和高度
-	cellW := float64(cols) / 19.0
-	cellH := float64(rows) / 19.0
-
-	// 修正偏移：红色角标位于黑棋左上角，我们加上半个格子的偏移以对准棋子中心
-	gridX := int(math.Floor(indicatorX / cellW))
-	gridY := int(math.Floor(indicatorY / cellH))
-
-	// 越界检查
+	// 边界检查
 	if gridX >= 0 && gridX < 19 && gridY >= 0 && gridY < 19 {
 		return gridX, gridY, nil
 	} else {
@@ -341,34 +290,108 @@ func boardblack(img gocv.Mat) (int, int, error) {
 
 // boardwhite 识别白棋
 func boardwhite(img gocv.Mat) (int, int, error) {
-	// 2. 转换到 HSV
+	// 使用统一的角标检测函数
+	markerRect, found := findLastMoveMarker(img)
+	if !found {
+		return 0, 0, fmt.Errorf("未检测到蓝色角标")
+	}
+
+	// 计算格子大小
+	width := float64(img.Cols())
+	height := float64(img.Rows())
+	cellW := width / 19.0
+	cellH := height / 19.0
+
+	// 半径偏移：角标左上角 + 半径 = 棋子中心点
+	radiusW := cellW / 2.0
+	radiusH := cellH / 2.0
+	centerX := float64(markerRect.Min.X) + radiusW
+	centerY := float64(markerRect.Min.Y) + radiusH
+
+	// 直接使用Floor取整索引
+	gridX := int(math.Floor(centerX / cellW))
+	gridY := int(math.Floor(centerY / cellH))
+
+	// 边界检查
+	if gridX >= 0 && gridX < 19 && gridY >= 0 && gridY < 19 {
+		return gridX, gridY, nil
+	} else {
+		return 0, 0, fmt.Errorf("计算出的坐标超出范围: X:%d, Y:%d", gridX, gridY)
+	}
+}
+
+// findBoardRect 寻找图片中的棋盘矩形区域
+func findBoardRect(img gocv.Mat) image.Rectangle {
+	gray := gocv.NewMat()
+	defer gray.Close()
+	gocv.CvtColor(img, &gray, gocv.ColorBGRToGray)
+	gocv.GaussianBlur(gray, &gray, image.Pt(5, 5), 0, 0, gocv.BorderDefault)
+
+	edges := gocv.NewMat()
+	defer edges.Close()
+	gocv.Canny(gray, &edges, 50, 150)
+
+	contours := gocv.FindContours(edges, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours.Close()
+
+	maxArea := 0.0
+	bestRect := image.Rect(0, 0, img.Cols(), img.Rows())
+
+	for i := 0; i < contours.Size(); i++ {
+		area := gocv.ContourArea(contours.At(i))
+		rect := gocv.BoundingRect(contours.At(i))
+		ratio := float64(rect.Dx()) / float64(rect.Dy())
+		if area > maxArea && area > float64(img.Cols()*img.Cols()/4) && ratio > 0.9 && ratio < 1.1 {
+			maxArea = area
+			bestRect = rect
+		}
+	}
+
+	if maxArea == 0 {
+		w := img.Cols()
+		return image.Rect(0, (img.Rows()-w)/2, w, (img.Rows()+w)/2)
+	}
+	return bestRect
+}
+
+// findLastMoveMarker 同时检测红色和蓝色，返回最大的色块区域
+func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 	hsv := gocv.NewMat()
 	defer hsv.Close()
 	gocv.CvtColor(img, &hsv, gocv.ColorBGRToHSV)
 
-	// 3. 识别蓝色角标 (白棋最后一手)
-	lowerBlue := gocv.NewScalar(100, 120, 100, 0)
-	upperBlue := gocv.NewScalar(140, 255, 255, 0)
-
 	mask := gocv.NewMat()
 	defer mask.Close()
-	l := gocv.NewMatWithSizeFromScalar(lowerBlue, hsv.Rows(), hsv.Cols(), hsv.Type())
-	u := gocv.NewMatWithSizeFromScalar(upperBlue, hsv.Rows(), hsv.Cols(), hsv.Type())
-	defer l.Close()
-	defer u.Close()
 
-	gocv.InRange(hsv, l, u, &mask)
+	// 红色范围（黑棋最后一手）- 包含两个区间
+	mRed1 := gocv.NewMat()
+	mRed2 := gocv.NewMat()
+	gocv.InRangeWithScalar(hsv, gocv.NewScalar(0, 160, 100, 0), gocv.NewScalar(10, 255, 255, 0), &mRed1)
+	gocv.InRangeWithScalar(hsv, gocv.NewScalar(170, 160, 100, 0), gocv.NewScalar(180, 255, 255, 0), &mRed2)
 
-	// 4. 寻找轮廓
+	// 蓝色范围（白棋最后一手）
+	mBlue := gocv.NewMat()
+	gocv.InRangeWithScalar(hsv, gocv.NewScalar(100, 160, 100, 0), gocv.NewScalar(140, 255, 255, 0), &mBlue)
+
+	// 合并 Mask
+	gocv.BitwiseOr(mRed1, mRed2, &mask)
+	gocv.BitwiseOr(mask, mBlue, &mask)
+
+	mRed1.Close()
+	mRed2.Close()
+	mBlue.Close()
+
+	// 查找轮廓
 	contours := gocv.FindContours(mask, gocv.RetrievalExternal, gocv.ChainApproxSimple)
 	defer contours.Close()
 
 	if contours.Size() == 0 {
-		return 0, 0, fmt.Errorf("未检测到蓝色角标")
+		return image.Rectangle{}, false
 	}
 
-	var maxArea float64
+	// 获取面积最大的轮廓，避免干扰
 	var bestRect image.Rectangle
+	maxArea := 0.0
 	for i := 0; i < contours.Size(); i++ {
 		area := gocv.ContourArea(contours.At(i))
 		if area > maxArea {
@@ -377,33 +400,57 @@ func boardwhite(img gocv.Mat) (int, int, error) {
 		}
 	}
 
-	// 5. 坐标计算逻辑优化
-	rows, cols := float64(img.Rows()), float64(img.Cols())
+	return bestRect, maxArea > 0
+}
 
-	// 角标在左上角，我们取它的中心点
-	markerX := float64(bestRect.Min.X+bestRect.Max.X) / 2.0
-	markerY := float64(bestRect.Min.Y+bestRect.Max.Y) / 2.0
+// findMarker 寻找红色或蓝色角标
+func findMarker(img gocv.Mat) (float64, float64, bool) {
+	hsv := gocv.NewMat()
+	defer hsv.Close()
+	gocv.CvtColor(img, &hsv, gocv.ColorBGRToHSV)
 
-	// 关键修正：
-	// 棋子中心大约在角标右下方 1/3 个格子处。
-	// 我们估算出棋子中心的像素位置，然后再映射到 0-18 的网格线上。
-	cellW := cols / 19.0
-	cellH := rows / 19.0
+	mask := gocv.NewMat()
+	defer mask.Close()
 
-	// 补偿角标到棋子中心的位移（向右下偏移约 0.4 个格子）
-	estimatedCenterX := markerX + (cellW * 0.4)
-	estimatedCenterY := markerY + (cellH * 0.4)
+	ranges := [][]gocv.Scalar{
+		{gocv.NewScalar(0, 150, 150, 0), gocv.NewScalar(10, 255, 255, 0)},
+		{gocv.NewScalar(160, 150, 150, 0), gocv.NewScalar(180, 255, 255, 0)},
+		{gocv.NewScalar(100, 150, 150, 0), gocv.NewScalar(130, 255, 255, 0)},
+	}
 
-	// 使用 Round（四舍五入）找到最接近的第几条线
-	// 由于 19 条线对应 18 个间隔，我们用总宽除以 19 区间来定位
-	gridX := int(math.Floor(estimatedCenterX / cellW))
-	gridY := int(math.Floor(estimatedCenterY / cellH))
+	finalMask := gocv.NewMatWithSize(hsv.Rows(), hsv.Cols(), gocv.MatTypeCV8U)
+	defer finalMask.Close()
 
-	// 强制限定在 0-18 范围内
-	gridX = clamp(gridX, 0, 18)
-	gridY = clamp(gridY, 0, 18)
+	for _, r := range ranges {
+		m := gocv.NewMat()
+		l := gocv.NewMatWithSizeFromScalar(r[0], hsv.Rows(), hsv.Cols(), hsv.Type())
+		u := gocv.NewMatWithSizeFromScalar(r[1], hsv.Rows(), hsv.Cols(), hsv.Type())
+		gocv.InRange(hsv, l, u, &m)
+		gocv.BitwiseOr(finalMask, m, &finalMask)
+		m.Close()
+		l.Close()
+		u.Close()
+	}
 
-	return gridX, gridY, nil
+	contours := gocv.FindContours(finalMask, gocv.RetrievalExternal, gocv.ChainApproxSimple)
+	defer contours.Close()
+
+	if contours.Size() == 0 {
+		return 0, 0, false
+	}
+
+	var bestRect image.Rectangle
+	maxA := 0.0
+	for i := 0; i < contours.Size(); i++ {
+		a := gocv.ContourArea(contours.At(i))
+		if a > maxA {
+			maxA = a
+			bestRect = gocv.BoundingRect(contours.At(i))
+		}
+	}
+
+	return float64(bestRect.Min.X+bestRect.Max.X) / 2.0,
+		float64(bestRect.Min.Y+bestRect.Max.Y) / 2.0, true
 }
 
 // clamp 保证索引在 0-18 之间
@@ -415,273 +462,4 @@ func clamp(val, min, max int) int {
 		return max
 	}
 	return val
-}
-
-// BatchStats 批量识别统计信息
-type BatchStats struct {
-	TotalCount   int     `json:"total_count"`
-	SuccessCount int     `json:"success_count"`
-	FailureCount int     `json:"failure_count"`
-	SuccessRate  float64 `json:"success_rate"`
-	BlackCount   int     `json:"black_count"`
-	WhiteCount   int     `json:"white_count"`
-}
-
-// BatchDetail 批量识别详细信息
-type BatchDetail struct {
-	Filename  string  `json:"filename"`
-	Success   bool    `json:"success"`
-	Result    Result  `json:"result"`
-	Error     string  `json:"error,omitempty"`
-	ExpectedX int     `json:"expected_x"`
-	ExpectedY int     `json:"expected_y"`
-	ImageSize string  `json:"image_size"`
-	Distance  float64 `json:"distance"`
-}
-
-// BatchRecognizeImages 批量识别图像
-func BatchRecognizeImages(imagesDir string) (*BatchStats, []BatchDetail, error) {
-	var stats BatchStats
-	var details []BatchDetail
-
-	files, err := os.ReadDir(imagesDir)
-	if err != nil {
-		return nil, nil, fmt.Errorf("读取图像目录失败: %v", err)
-	}
-
-	for _, file := range files {
-		if file.IsDir() {
-			continue
-		}
-
-		filename := file.Name()
-		imagePath := filepath.Join(imagesDir, filename)
-
-		if !strings.HasSuffix(strings.ToLower(filename), ".jpg") &&
-			!strings.HasSuffix(strings.ToLower(filename), ".png") {
-			continue
-		}
-
-		moveNumber, color, expectedX, expectedY, err := parseFilename(filename)
-		if err != nil {
-			details = append(details, BatchDetail{
-				Filename: filename,
-				Success:  false,
-				Error:    fmt.Sprintf("解析文件名失败: %v", err),
-			})
-			continue
-		}
-
-		img := gocv.IMRead(imagePath, gocv.IMReadColor)
-		if img.Empty() {
-			details = append(details, BatchDetail{
-				Filename: filename,
-				Success:  false,
-				Error:    "读取图像失败",
-			})
-			continue
-		}
-		defer img.Close()
-
-		imageSize := fmt.Sprintf("%dx%d", img.Cols(), img.Rows())
-
-		result, err := DetectLastMoveCoord(img, moveNumber)
-		if err != nil {
-			details = append(details, BatchDetail{
-				Filename: filename,
-				Success:  false,
-				Error:    fmt.Sprintf("检测失败: %v", err),
-			})
-			continue
-		}
-
-		err = saveDebugInfo(imagesDir, filename, result, img)
-		if err != nil {
-			fmt.Printf("保存 debug 信息失败 %s: %v\n", filename, err)
-		}
-
-		distance := math.Sqrt(math.Pow(float64(result.X-expectedX), 2) + math.Pow(float64(result.Y-expectedY), 2))
-		success := result.X > 0 && result.Y > 0 && result.Color == color && distance < 0.5
-
-		details = append(details, BatchDetail{
-			Filename:  filename,
-			Success:   success,
-			Result:    result,
-			ExpectedX: expectedX,
-			ExpectedY: expectedY,
-			ImageSize: imageSize,
-			Distance:  distance,
-		})
-
-		stats.TotalCount++
-		if success {
-			stats.SuccessCount++
-			if color == "B" {
-				stats.BlackCount++
-			} else {
-				stats.WhiteCount++
-			}
-		} else {
-			stats.FailureCount++
-		}
-	}
-
-	if stats.TotalCount > 0 {
-		stats.SuccessRate = float64(stats.SuccessCount) / float64(stats.TotalCount) * 100
-	}
-
-	return &stats, details, nil
-}
-
-// PrintBatchRecognitionStats 打印批量识别统计结果
-func PrintBatchRecognitionStats(stats *BatchStats, details []BatchDetail) {
-	fmt.Println("\n" + strings.Repeat("-", 104))
-	fmt.Printf("%-30s | %-15s | %-15s | %-10s | %-10s | %s\n", "文件名", "预期结果", "检测结果", "图像尺寸", "置信度", "状态")
-	fmt.Println(strings.Repeat("-", 104))
-
-	var totalDistance float64
-	var maxDistance float64
-	var minDistance float64 = math.MaxFloat64
-
-	for _, detail := range details {
-		expectedCoord := fmt.Sprintf("%d-%s", detail.Result.Move, detail.Result.Color)
-		detectedCoord := fmt.Sprintf("%d-%s", detail.Result.Move, detail.Result.Color)
-		if detail.Result.X > 0 && detail.Result.Y > 0 {
-			xChar := string(rune('A' + detail.ExpectedX - 1))
-			expectedCoord = fmt.Sprintf("%d-%s%d", detail.Result.Move, xChar, detail.ExpectedY)
-			detectedXChar := string(rune('A' + detail.Result.X - 1))
-			detectedCoord = fmt.Sprintf("%d-%s%d", detail.Result.Move, detectedXChar, detail.Result.Y)
-		}
-
-		status := "✅ 正确"
-		if !detail.Success {
-			status = "❌ 错误"
-		}
-
-		fmt.Printf("%-30s | %-15s | %-15s | %-10s | %-10.2f | %s\n",
-			detail.Filename, expectedCoord, detectedCoord, detail.ImageSize, detail.Result.Confidence, status)
-
-		if !detail.Success {
-			fmt.Printf("   -> 坐标误差: %.2f\n", detail.Distance)
-		}
-
-		if detail.Result.X > 0 && detail.Result.Y > 0 {
-			totalDistance += detail.Distance * detail.Distance
-			if detail.Distance > maxDistance {
-				maxDistance = detail.Distance
-			}
-			if detail.Distance < minDistance {
-				minDistance = detail.Distance
-			}
-		}
-	}
-
-	fmt.Println(strings.Repeat("-", 104))
-	fmt.Printf("测试总结: 总计 %d, 成功 %d, 失败 %d, 成功率 %.2f%%\n",
-		stats.TotalCount, stats.SuccessCount, stats.FailureCount, stats.SuccessRate)
-	fmt.Println(strings.Repeat("-", 104))
-
-	if stats.TotalCount > 0 {
-		mse := totalDistance / float64(stats.TotalCount)
-		rmse := math.Sqrt(mse)
-
-		fmt.Println("误差统计:")
-		fmt.Printf("总误差数量: %d\n", stats.TotalCount)
-		fmt.Printf("均方误差 (MSE): %.2f\n", mse)
-		fmt.Printf("均方根误差 (RMSE): %.2f\n", rmse)
-		if maxDistance > 0 {
-			fmt.Printf("最大误差: %.2f\n", maxDistance)
-		}
-		if minDistance < math.MaxFloat64 {
-			fmt.Printf("最小误差: %.2f\n", minDistance)
-		}
-	}
-}
-
-// parseFilename 从文件名解析手数、颜色和预期坐标
-// 文件名格式: {move}-{coord}-{color}.jpg 或 {move}-{coord}-{color}.png
-// 例如: 1-P4-black.jpg, 2-Q5-white.png
-func parseFilename(filename string) (int, string, int, int, error) {
-	base := strings.TrimSuffix(filename, filepath.Ext(filename))
-
-	parts := strings.Split(base, "-")
-	if len(parts) < 3 {
-		return 0, "", 0, 0, fmt.Errorf("文件名格式不正确: %s", filename)
-	}
-
-	moveNumber, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, "", 0, 0, fmt.Errorf("手数解析失败: %v", err)
-	}
-
-	color := strings.ToUpper(string(parts[2][0]))
-	if color != "B" && color != "W" {
-		return 0, "", 0, 0, fmt.Errorf("颜色不正确: %s", parts[2])
-	}
-
-	coord := parts[1]
-	if len(coord) < 2 {
-		return 0, "", 0, 0, fmt.Errorf("坐标格式不正确: %s", coord)
-	}
-
-	coordX := int(coord[0] - 'A' + 1)
-	coordY, err := strconv.Atoi(coord[1:])
-	if err != nil {
-		return 0, "", 0, 0, fmt.Errorf("坐标Y解析失败: %v", err)
-	}
-
-	return moveNumber, color, coordX, coordY, nil
-}
-
-// saveDebugInfo 保存 debug 信息和图像
-func saveDebugInfo(imagesDir, filename string, result Result, img gocv.Mat) error {
-	debugDir := filepath.Join(imagesDir, "debug")
-	if err := os.MkdirAll(debugDir, 0755); err != nil {
-		return fmt.Errorf("创建 debug 目录失败: %v", err)
-	}
-
-	testDir := filepath.Join(debugDir, strings.TrimSuffix(filename, filepath.Ext(filename)))
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		return fmt.Errorf("创建测试用例 debug 目录失败: %v", err)
-	}
-
-	originalPath := filepath.Join(testDir, "original.jpg")
-	gocv.IMWrite(originalPath, img)
-
-	debugPath := filepath.Join(testDir, "debug.json")
-	debugData := map[string]any{
-		"filename":    filename,
-		"move_number": result.Move,
-		"color":       result.Color,
-		"x":           result.X,
-		"y":           result.Y,
-		"confidence":  result.Confidence,
-		"debug":       result.Debug,
-	}
-
-	jsonData, err := json.MarshalIndent(debugData, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化 debug 信息失败: %v", err)
-	}
-
-	if err := os.WriteFile(debugPath, jsonData, 0644); err != nil {
-		return fmt.Errorf("保存 debug 信息失败: %v", err)
-	}
-
-	if result.X > 0 && result.Y > 0 {
-		markedImg := img.Clone()
-		defer markedImg.Close()
-
-		centerX := (result.X-1)*img.Cols()/19 + img.Cols()/38
-		centerY := (result.Y-1)*img.Rows()/19 + img.Rows()/38
-		center := image.Point{X: centerX, Y: centerY}
-
-		green := color.RGBA{R: 0, G: 255, B: 0, A: 0}
-		gocv.Circle(&markedImg, center, 20, green, 3)
-
-		markedPath := filepath.Join(testDir, "marked.jpg")
-		gocv.IMWrite(markedPath, markedImg)
-	}
-
-	return nil
 }

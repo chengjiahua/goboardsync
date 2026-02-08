@@ -1,9 +1,10 @@
 {
   "color": "W",
-  "confidence": 0.8,
+  "confidence": 0,
   "debug": {
     "board_localization_method": "fixed",
-    "final_status": "success",
+    "detection_error": "计算出的坐标超出范围: X:19, Y:4",
+    "final_status": "failed_at_detection",
     "fixed_resolution": "1200x2670",
     "image_size": "1200x2670",
     "move_number": 98,
@@ -11,6 +12,6 @@
   },
   "filename": "98-S5-white.jpg",
   "move_number": 98,
-  "x": 19,
-  "y": 5
+  "x": 0,
+  "y": 0
 }
