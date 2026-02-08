@@ -280,12 +280,11 @@ func boardblack(img gocv.Mat) (int, int, error) {
 	gridX := int(math.Floor(centerX / cellW))
 	gridY := int(math.Floor(centerY / cellH))
 
-	// 边界检查
-	if gridX >= 0 && gridX < 19 && gridY >= 0 && gridY < 19 {
-		return gridX, gridY, nil
-	} else {
-		return 0, 0, fmt.Errorf("计算出的坐标超出范围: X:%d, Y:%d", gridX, gridY)
-	}
+	// 边界限制：确保坐标在0-18范围内
+	gridX = clamp(gridX, 0, 18)
+	gridY = clamp(gridY, 0, 18)
+
+	return gridX, gridY, nil
 }
 
 // boardwhite 识别白棋
@@ -312,12 +311,11 @@ func boardwhite(img gocv.Mat) (int, int, error) {
 	gridX := int(math.Floor(centerX / cellW))
 	gridY := int(math.Floor(centerY / cellH))
 
-	// 边界检查
-	if gridX >= 0 && gridX < 19 && gridY >= 0 && gridY < 19 {
-		return gridX, gridY, nil
-	} else {
-		return 0, 0, fmt.Errorf("计算出的坐标超出范围: X:%d, Y:%d", gridX, gridY)
-	}
+	// 边界限制：确保坐标在0-18范围内
+	gridX = clamp(gridX, 0, 18)
+	gridY = clamp(gridY, 0, 18)
+
+	return gridX, gridY, nil
 }
 
 // findBoardRect 寻找图片中的棋盘矩形区域

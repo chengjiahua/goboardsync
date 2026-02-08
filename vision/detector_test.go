@@ -1,10 +1,7 @@
 package vision
 
 import (
-	"encoding/json"
 	"fmt"
-	"image"
-	"image/color"
 	"math"
 	"os"
 	"path/filepath"
@@ -109,11 +106,6 @@ func BatchRecognizeImages(imagesDir string) (*BatchStats, []BatchDetail, error) 
 				Error:    fmt.Sprintf("检测失败: %v", err),
 			})
 			continue
-		}
-
-		err = saveDebugInfo(imagesDir, filename, result, img)
-		if err != nil {
-			fmt.Printf("保存 debug 信息失败 %s: %v\n", filename, err)
 		}
 
 		distance := math.Sqrt(math.Pow(float64(result.X-expectedX), 2) + math.Pow(float64(result.Y-expectedY), 2))
@@ -247,57 +239,4 @@ func parseFilename(filename string) (int, string, int, int, error) {
 	}
 
 	return moveNumber, color, coordX, coordY, nil
-}
-
-// saveDebugInfo 保存 debug 信息和图像
-func saveDebugInfo(imagesDir, filename string, result Result, img gocv.Mat) error {
-	debugDir := filepath.Join(imagesDir, "debug")
-	if err := os.MkdirAll(debugDir, 0755); err != nil {
-		return fmt.Errorf("创建 debug 目录失败: %v", err)
-	}
-
-	testDir := filepath.Join(debugDir, strings.TrimSuffix(filename, filepath.Ext(filename)))
-	if err := os.MkdirAll(testDir, 0755); err != nil {
-		return fmt.Errorf("创建测试用例 debug 目录失败: %v", err)
-	}
-
-	originalPath := filepath.Join(testDir, "original.jpg")
-	gocv.IMWrite(originalPath, img)
-
-	debugPath := filepath.Join(testDir, "debug.json")
-	debugData := map[string]any{
-		"filename":    filename,
-		"move_number": result.Move,
-		"color":       result.Color,
-		"x":           result.X,
-		"y":           result.Y,
-		"confidence":  result.Confidence,
-		"debug":       result.Debug,
-	}
-
-	jsonData, err := json.MarshalIndent(debugData, "", "  ")
-	if err != nil {
-		return fmt.Errorf("序列化 debug 信息失败: %v", err)
-	}
-
-	if err := os.WriteFile(debugPath, jsonData, 0644); err != nil {
-		return fmt.Errorf("保存 debug 信息失败: %v", err)
-	}
-
-	if result.X > 0 && result.Y > 0 {
-		markedImg := img.Clone()
-		defer markedImg.Close()
-
-		centerX := (result.X-1)*img.Cols()/19 + img.Cols()/38
-		centerY := (result.Y-1)*img.Rows()/19 + img.Rows()/38
-		center := image.Point{X: centerX, Y: centerY}
-
-		green := color.RGBA{R: 0, G: 255, B: 0, A: 0}
-		gocv.Circle(&markedImg, center, 20, green, 3)
-
-		markedPath := filepath.Join(testDir, "marked.jpg")
-		gocv.IMWrite(markedPath, markedImg)
-	}
-
-	return nil
 }
