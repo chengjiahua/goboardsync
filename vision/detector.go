@@ -11,58 +11,50 @@ import (
 	"net/http"
 	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"gocv.io/x/gocv"
 )
 
 const (
-	// BoardWarpSize 棋盘矫正后的大小
 	BoardWarpSize = 1024
-	// BoardMargin 棋盘向外扩展的边距（像素），用于确保边缘棋子完整显示
-	BoardMargin = 30
 )
 
-// FixedBoardCorners 为常见分辨率预定义的棋盘四角（按顺时针或逆时针顺序）
 var FixedBoardCorners = map[string][]image.Point{
 	"1200x2670": {
-		{10, 506},
-		{1190, 506},
-		{1190, 1680},
-		{10, 1680},
+		{40, 536},
+		{1160, 536},
+		{1160, 1650},
+		{40, 1650},
 	},
 }
 
-// Result 识别结果结构
 type Result struct {
 	Move       int             `json:"move"`
-	Color      string          `json:"color"` // "W" or "B"
-	X          int             `json:"x"`     // 1..19
-	Y          int             `json:"y"`     // 1..19
+	Color      string          `json:"color"`
+	X          int             `json:"x"`
+	Y          int             `json:"y"`
 	Confidence float64         `json:"confidence"`
-	MarkerRect image.Rectangle `json:"marker_rect"` // 保存检测到的标记位置
+	MarkerRect image.Rectangle `json:"marker_rect"`
 	Debug      map[string]any  `json:"debug"`
 }
 
-// Detector 检测器结构体
 type Detector struct {
-	OCREndpoint string // OCR 服务地址
+	OCREndpoint string
 }
 
-// NewDetector 创建新的检测器
 func NewDetector() *Detector {
 	return &Detector{
 		OCREndpoint: "http://127.0.0.1:5001/ocr",
 	}
 }
 
-// FetchMoveNumberFromOCR 调用本地 OCR 接口获取当前手数
 func (d *Detector) FetchMoveNumberFromOCR(img gocv.Mat) (int, error) {
 	if img.Empty() {
 		return 0, fmt.Errorf("图片为空")
 	}
 
-	// 1. 将 gocv.Mat 编码为 jpeg
 	buf := new(bytes.Buffer)
 	imgBytes, err := gocv.IMEncode(".jpg", img)
 	if err != nil {
@@ -71,18 +63,21 @@ func (d *Detector) FetchMoveNumberFromOCR(img gocv.Mat) (int, error) {
 	defer imgBytes.Close()
 	buf.Write(imgBytes.GetBytes())
 
-	// 2. 构建 multipart/form-data 请求
 	body := &bytes.Buffer{}
 	writer := multipart.NewWriter(body)
-	part, err := writer.CreateFormFile("image", "image.jpg")
+
+	part, err := writer.CreateFormFile("file", "image.jpg")
 	if err != nil {
 		return 0, fmt.Errorf("创建表单文件失败: %v", err)
 	}
-	io.Copy(part, buf)
+
+	_, err = io.Copy(part, buf)
+	if err != nil {
+		return 0, fmt.Errorf("写入图片数据失败: %v", err)
+	}
 	writer.Close()
 
-	// 3. 发送 POST 请求
-	client := &http.Client{Timeout: 5 * time.Second}
+	client := &http.Client{Timeout: 10 * time.Second}
 	req, err := http.NewRequest("POST", d.OCREndpoint, body)
 	if err != nil {
 		return 0, fmt.Errorf("创建请求失败: %v", err)
@@ -96,52 +91,97 @@ func (d *Detector) FetchMoveNumberFromOCR(img gocv.Mat) (int, error) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return 0, fmt.Errorf("OCR 响应错误: %d", resp.StatusCode)
+		respData, _ := io.ReadAll(resp.Body)
+		return 0, fmt.Errorf("OCR 响应错误: %d, 响应: %s", resp.StatusCode, string(respData))
 	}
 
-	// 4. 解析响应
+	respData, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return 0, fmt.Errorf("读取响应失败: %v", err)
+	}
+
+	var allText strings.Builder
+
 	var results []struct {
 		Words string `json:"words"`
 	}
-	respData, _ := io.ReadAll(resp.Body)
 	err = json.Unmarshal(respData, &results)
-	if err != nil {
-		// 尝试另一种格式 (有些 OCR 返回的是对象列表)
+	if err == nil && len(results) > 0 {
+		for _, r := range results {
+			allText.WriteString(r.Words)
+			allText.WriteString(" ")
+		}
+	} else {
 		var wrapper struct {
 			Results []struct {
 				Words string `json:"words"`
 			} `json:"results"`
 		}
-		if err2 := json.Unmarshal(respData, &wrapper); err2 == nil {
-			results = wrapper.Results
+		if err2 := json.Unmarshal(respData, &wrapper); err2 == nil && len(wrapper.Results) > 0 {
+			for _, r := range wrapper.Results {
+				allText.WriteString(r.Words)
+				allText.WriteString(" ")
+			}
 		} else {
-			return 0, fmt.Errorf("解析 OCR 结果失败: %v", err)
+			allText.WriteString(string(respData))
 		}
 	}
 
-	// 5. 正则提取手数
-	re := regexp.MustCompile(`第\s*(\d+)\s*手`)
-	for _, result := range results {
-		matches := re.FindStringSubmatch(result.Words)
-		if len(matches) > 1 {
-			moveNum, err := strconv.Atoi(matches[1])
-			if err == nil && moveNum > 0 {
-				return moveNum, nil
-			}
-		}
+	fullText := strings.TrimSpace(allText.String())
+	moveNumber := extractMoveNumber(fullText)
+
+	if moveNumber > 0 {
+		return moveNumber, nil
 	}
 
 	return 0, fmt.Errorf("未识别到有效手数")
 }
 
-// WarpBoard 对棋盘进行透视矫正
+func extractMoveNumber(text string) int {
+	if text == "" {
+		return 0
+	}
+
+	patterns := []struct {
+		name     string
+		pattern  string
+		priority int
+	}{
+		{"中文格式", `第\s*(\d+)\s*手`, 1},
+		{"纯数字+手", `(\d+)\s*手`, 2},
+		{"井号格式", `#\s*(\d+)`, 3},
+		{"move格式", `(?i)move\s*:?\s*(\d+)`, 4},
+		{"Step格式", `(?i)step\s*:?\s*(\d+)`, 5},
+		{"最后数字", `(\d+)$`, 6},
+	}
+
+	for _, p := range patterns {
+		re := regexp.MustCompile(p.pattern)
+		matches := re.FindStringSubmatch(text)
+		if len(matches) > 1 {
+			num, err := strconv.Atoi(matches[1])
+			if err == nil && num > 0 && num < 2000 {
+				return num
+			}
+		}
+	}
+
+	nums := regexp.MustCompile(`(\d+)`).FindAllString(text, -1)
+
+	for i := len(nums) - 1; i >= 0; i-- {
+		if num, err := strconv.Atoi(nums[i]); err == nil && num > 0 && num < 500 {
+			return num
+		}
+	}
+
+	return 0
+}
+
 func WarpBoard(img gocv.Mat, corners []image.Point) (gocv.Mat, error) {
-	// 确保有4个角点
 	if len(corners) != 4 {
 		return gocv.Mat{}, fmt.Errorf("需要4个角点")
 	}
 
-	// 目标棋盘大小
 	dst := []image.Point{
 		{0, 0},
 		{BoardWarpSize, 0},
@@ -149,27 +189,23 @@ func WarpBoard(img gocv.Mat, corners []image.Point) (gocv.Mat, error) {
 		{0, BoardWarpSize},
 	}
 
-	// 转换为 gocv.PointVector
 	srcPoints := gocv.NewPointVectorFromPoints(corners)
 	defer srcPoints.Close()
 
 	dstPoints := gocv.NewPointVectorFromPoints(dst)
 	defer dstPoints.Close()
 
-	// 计算透视变换矩阵
 	M := gocv.GetPerspectiveTransform(srcPoints, dstPoints)
 	if M.Empty() {
 		return gocv.Mat{}, fmt.Errorf("计算透视变换矩阵失败")
 	}
 
-	// 应用透视变换
 	warped := gocv.NewMat()
 	gocv.WarpPerspective(img, &warped, M, image.Point{X: BoardWarpSize, Y: BoardWarpSize})
 
 	return warped, nil
 }
 
-// DetectLastMoveCoord 检测最后一手的坐标
 func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 	debugInfo := make(map[string]any)
 	debugInfo["image_size"] = fmt.Sprintf("%dx%d", img.Cols(), img.Rows())
@@ -196,7 +232,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 			Y:          0,
 			Confidence: 0,
 			Debug:      debugInfo,
-		}, fmt.Errorf("不支持的图片分辨率: %dx%d，请添加硬编码的棋盘区域", img.Cols(), img.Rows())
+		}, fmt.Errorf("不支持的图片分辨率: %dx%d", img.Cols(), img.Rows())
 	}
 
 	warped, err := WarpBoard(img, corners)
@@ -213,6 +249,8 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 		}, nil
 	}
 	defer warped.Close()
+
+	fmt.Printf("[检测] 开始检测最后一手，moveNumber=%d\n", moveNumber)
 
 	isBlack := moveNumber%2 == 1
 	if isBlack {
@@ -231,6 +269,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 			}, nil
 		}
 		color = "B"
+		fmt.Printf("[检测] 黑棋，检测到标记位置: %v\n", markerRect)
 	} else {
 		markerRect, gridX, gridY, err = boardwhite(warped)
 		if err != nil {
@@ -247,6 +286,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 			}, nil
 		}
 		color = "W"
+		fmt.Printf("[检测] 白棋，检测到标记位置: %v\n", markerRect)
 	}
 
 	debugInfo["final_status"] = "success"
@@ -260,29 +300,24 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 		Debug:      debugInfo,
 	}
 
+	fmt.Printf("[检测] 完成，坐标: %d-%s%d\n", result.Move, string(rune('A'+result.X-1)), result.Y)
+
 	return result, nil
 }
 
-// calculateGrid 根据标记矩形计算网格坐标和中心点
 func calculateGrid(markerRect image.Rectangle, width, height int) (int, int, image.Point) {
-	margin := float64(BoardMargin)
+	cellW := float64(width) / 19.0
+	cellH := float64(height) / 19.0
 
-	effectiveW := float64(width) - (margin * 2)
-	effectiveH := float64(height) - (margin * 2)
+	centerX := float64(markerRect.Min.X) + cellW/2.0
+	centerY := float64(markerRect.Min.Y) + cellH/2.0
 
-	cellW := effectiveW / 18.0
-	cellH := effectiveH / 18.0
-
-	centerX := float64(markerRect.Min.X+markerRect.Max.X) / 2.0
-	centerY := float64(markerRect.Min.Y+markerRect.Max.Y) / 2.0
-
-	gridX := int(math.Round((centerX - margin) / cellW))
-	gridY := int(math.Round((centerY - margin) / cellH))
+	gridX := int(math.Floor(centerX / cellW))
+	gridY := int(math.Floor(centerY / cellH))
 
 	return clamp(gridX, 0, 18), clamp(gridY, 0, 18), image.Pt(int(centerX), int(centerY))
 }
 
-// boardblack 识别黑棋
 func boardblack(img gocv.Mat) (image.Rectangle, int, int, error) {
 	markerRect, found := findLastMoveMarker(img)
 	if !found {
@@ -294,7 +329,6 @@ func boardblack(img gocv.Mat) (image.Rectangle, int, int, error) {
 	return markerRect, gridX, gridY, nil
 }
 
-// boardwhite 识别白棋
 func boardwhite(img gocv.Mat) (image.Rectangle, int, int, error) {
 	markerRect, found := findLastMoveMarker(img)
 	if !found {
@@ -306,7 +340,6 @@ func boardwhite(img gocv.Mat) (image.Rectangle, int, int, error) {
 	return markerRect, gridX, gridY, nil
 }
 
-// findBoardRect 寻找图片中的棋盘矩形区域
 func findBoardRect(img gocv.Mat) image.Rectangle {
 	gray := gocv.NewMat()
 	defer gray.Close()
@@ -340,7 +373,6 @@ func findBoardRect(img gocv.Mat) image.Rectangle {
 	return bestRect
 }
 
-// findLastMoveMarker 同时检测红色和蓝色，返回最大的色块区域
 func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 	hsv := gocv.NewMat()
 	defer hsv.Close()
@@ -349,17 +381,14 @@ func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 	mask := gocv.NewMat()
 	defer mask.Close()
 
-	// 红色范围（黑棋最后一手）- 包含两个区间
 	mRed1 := gocv.NewMat()
 	mRed2 := gocv.NewMat()
 	gocv.InRangeWithScalar(hsv, gocv.NewScalar(0, 160, 100, 0), gocv.NewScalar(10, 255, 255, 0), &mRed1)
 	gocv.InRangeWithScalar(hsv, gocv.NewScalar(170, 160, 100, 0), gocv.NewScalar(180, 255, 255, 0), &mRed2)
 
-	// 蓝色范围（白棋最后一手）
 	mBlue := gocv.NewMat()
 	gocv.InRangeWithScalar(hsv, gocv.NewScalar(100, 160, 100, 0), gocv.NewScalar(140, 255, 255, 0), &mBlue)
 
-	// 合并 Mask
 	gocv.BitwiseOr(mRed1, mRed2, &mask)
 	gocv.BitwiseOr(mask, mBlue, &mask)
 
@@ -367,7 +396,6 @@ func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 	mRed2.Close()
 	mBlue.Close()
 
-	// 查找轮廓
 	contours := gocv.FindContours(mask, gocv.RetrievalExternal, gocv.ChainApproxSimple)
 	defer contours.Close()
 
@@ -375,7 +403,6 @@ func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 		return image.Rectangle{}, false
 	}
 
-	// 获取面积最大的轮廓，避免干扰
 	var bestRect image.Rectangle
 	maxArea := 0.0
 	for i := 0; i < contours.Size(); i++ {
@@ -386,10 +413,11 @@ func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 		}
 	}
 
+	fmt.Printf("[HSV检测] 找到 %d 个轮廓，最大面积: %.2f\n", contours.Size(), maxArea)
+
 	return bestRect, maxArea > 0
 }
 
-// findMarker 寻找红色或蓝色角标
 func findMarker(img gocv.Mat) (float64, float64, bool) {
 	hsv := gocv.NewMat()
 	defer hsv.Close()
@@ -439,7 +467,6 @@ func findMarker(img gocv.Mat) (float64, float64, bool) {
 		float64(bestRect.Min.Y+bestRect.Max.Y) / 2.0, true
 }
 
-// clamp 保证索引在 0-18 之间
 func clamp(val, min, max int) int {
 	if val < min {
 		return min
