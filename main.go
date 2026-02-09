@@ -22,12 +22,12 @@ import (
 
 const (
 	WindowTitle   = "my_phone"
-	Interval      = 1000 * time.Microsecond
+	Interval      = 100 * time.Microsecond
 	ImageDir      = "/Users/chengjiahua/project/my-app"
 	TempImage     = "/Users/chengjiahua/project/my-app/screenshot.jpg"
 	TargetW       = 1200
 	TargetH       = 2670
-	POLL_INTERVAL = 1 * time.Second
+	POLL_INTERVAL = 1000 * time.Microsecond
 )
 
 var (
@@ -51,15 +51,15 @@ func main() {
 
 	go startScrcpy()
 
-	time.Sleep(2 * time.Second)
+	time.Sleep(1 * time.Second)
 
 	fmt.Printf("[%s] 🔄 启动双向同步...\n", time.Now().Format("15:04:05"))
 	fmt.Printf("[%s] 📱 监听手机 → KaTrain\n", time.Now().Format("15:04:05"))
 	fmt.Printf("[%s] 🖥️  监听 KaTrain → 手机\n", time.Now().Format("15:04:05"))
 	fmt.Println(strings.Repeat("=", 60))
 
-	// go syncPhoneToKatrain()
-	// go syncKatrainToPhone()
+	go syncPhoneToKatrain()
+	go syncKatrainToPhone()
 
 	select {}
 }
@@ -68,7 +68,6 @@ func startScrcpy() {
 	cmd := exec.Command("scrcpy",
 		"--window-title", WindowTitle,
 		"--always-on-top",
-		"--no-control",
 		"--max-fps", "15",
 	)
 	cmd.Stdout = os.Stdout
@@ -306,25 +305,56 @@ func getLastMove() (int, int, string, int, error) {
 	return result.LastMove.Coords[0], result.LastMove.Coords[1], result.LastMove.Player, result.LastMove.MoveNumber, nil
 }
 
-func gridToScreen(gridX, gridY int) (int, int) {
-	boardLeft := 40
-	boardTop := 536
-	boardRight := 1160
-	boardBottom := 1650
+// func gridToScreen(gridX, gridY int) (int, int) {
+// 	boardLeft := 40
+// 	boardTop := 536
+// 	boardRight := 1160
+// 	boardBottom := 1650
 
-	boardWidth := boardRight - boardLeft
-	boardHeight := boardBottom - boardTop
+// 	boardWidth := boardRight - boardLeft
+// 	boardHeight := boardBottom - boardTop
 
-	cellW := float64(boardWidth) / 18.0
-	cellH := float64(boardHeight) / 18.0
+// 	cellW := float64(boardWidth) / 18.0
+// 	cellH := float64(boardHeight) / 18.0
 
-	screenX := boardLeft + int(float64(gridX)*cellW+cellW/2)
-	screenY := boardTop + int(float64(gridY)*cellH+cellH/2)
+// 	screenX := boardLeft + int(float64(gridX)*cellW+cellW/2)
+// 	screenY := boardTop + int(float64(gridY)*cellH+cellH/2)
 
-	return screenX, screenY
+// 	return screenX, screenY
+// }
+
+func gridToScreen(x, y int) (int, int) {
+	// 针对 1200x2670 分辨率的腾讯围棋 App 精确对齐
+	// x: KaTrain 的 X 坐标 (0-18)，0代表A线，18代表S线
+	// y: KaTrain 的 Y 坐标 (0-18)，0代表底部(19线)，18代表顶部(1线)
+
+	const (
+		// A线 (第1根纵线) 的中心 X 像素
+		startX = 60.0
+		// 1线 (第1根横线) 的中心 Y 像素
+		startY = 560.0
+		// 棋盘格子的精确间距 (像素)
+		gap = 60.0
+	)
+
+	// 计算 X 轴：从左向右增加
+	// 公式：起始点 + 索引 * 间距
+	screenX := startX + float64(x)*gap
+
+	// 计算 Y 轴：KaTrain 的 Y=0 是最下面，而屏幕坐标 Y 是从上往下算的
+	// 所以需要翻转：屏幕Y = 起始点 + (18 - KaTrainY) * 间距
+	screenY := startY + float64(18-y)*gap
+
+	// 打印一下，方便你在日志里核对
+	// fmt.Printf("[坐标转换] KaTrain(%d,%d) -> 屏幕(%d,%d)\n", x, y, int(screenX), int(screenY))
+
+	return int(screenX), int(screenY)
 }
 
 func tapOnPhone(gridX, gridY int) error {
+	fmt.Printf("[%s] 🎯 准备落子: gridX:%d, gridY:%d\n", time.Now().Format("15:04:05"), gridX, gridY)
+
+	// 1. 计算棋盘落子点的屏幕坐标
 	screenX, screenY := gridToScreen(gridX, gridY)
 
 	adbPath, err := exec.LookPath("adb")
@@ -332,27 +362,37 @@ func tapOnPhone(gridX, gridY int) error {
 		return fmt.Errorf("未找到 adb: %v", err)
 	}
 
-	cmd := exec.Command(adbPath, "shell", "input", "tap", fmt.Sprintf("%d", screenX), fmt.Sprintf("%d", screenY))
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("ADB 点击失败: %v", err)
+	// 2. 执行第一次点击：移动落子指示标
+	cmd1 := exec.Command(adbPath, "shell", "input", "tap", fmt.Sprintf("%d", screenX), fmt.Sprintf("%d", screenY))
+	if err := cmd1.Run(); err != nil {
+		return fmt.Errorf("移动指示标失败: %v", err)
+	}
+	fmt.Printf("[%s] 📍 已移动指针到: (%d, %d)\n", time.Now().Format("15:04:05"), screenX, screenY)
+
+	// 3. 等待 300 毫秒，确保 App 反应过来了
+	time.Sleep(300 * time.Millisecond)
+
+	// 4. 执行第二次点击：点击“确认”按钮 (坐标 600, 2150)
+	confirmX, confirmY := 600, 2150
+	cmd2 := exec.Command(adbPath, "shell", "input", "tap", fmt.Sprintf("%d", confirmX), fmt.Sprintf("%d", confirmY))
+	if err := cmd2.Run(); err != nil {
+		return fmt.Errorf("点击确认按钮失败: %v", err)
 	}
 
-	xLetter := string(rune('A' + gridX - 1))
-	if xLetter > "S" {
-		xLetter = "T"
-	}
+	// 打印输出
+	xLetter := string(rune('A' + gridX)) // 修正字母显示逻辑
+	if xLetter >= "I" {
+		xLetter = string(rune('A' + gridX + 1))
+	} // 跳过 'I' 是某些棋盘的习惯，腾讯围棋通常不跳过
 
-	fmt.Printf("[%s] 📱 手机点击: %s%d (屏幕坐标: %d, %d)\n",
+	fmt.Printf("[%s] ✅ 落子成功！已点击“确认”按钮 (屏幕坐标: %d, %d)\n",
 		time.Now().Format("15:04:05"),
-		xLetter,
-		gridY+1,
-		screenX,
-		screenY,
+		confirmX,
+		confirmY,
 	)
 
 	return nil
 }
-
 func syncPhoneToKatrain() {
 	for {
 		screenshotPath, err := captureWithADB()
@@ -429,7 +469,7 @@ func phoneGridToKatrain(x, y int) (katrainX int, katrainY int) {
 func syncKatrainToPhone() {
 	for {
 		x, y, _, moveNumber, err := getLastMove()
-		fmt.Printf("[%s] ✅ 获取 KaTrain 最后一手: %s%d (手数: %d)\n",
+		fmt.Printf("[%s] ✅ 获取 KaTrain 最后一手: X:%d Y:%d (手数: %d)\n",
 			time.Now().Format("15:04:05"),
 			x,
 			y,

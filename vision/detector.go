@@ -250,7 +250,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 	}
 	defer warped.Close()
 
-	fmt.Printf("[检测] 开始检测最后一手，moveNumber=%d\n", moveNumber)
+	// fmt.Printf("[检测] 开始检测最后一手，moveNumber=%d\n", moveNumber)
 
 	isBlack := moveNumber%2 == 1
 	if isBlack {
@@ -269,7 +269,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 			}, nil
 		}
 		color = "B"
-		fmt.Printf("[检测] 黑棋，检测到标记位置: %v\n", markerRect)
+		// fmt.Printf("[检测] 黑棋，检测到标记位置: %v\n", markerRect)
 	} else {
 		markerRect, gridX, gridY, err = boardwhite(warped)
 		if err != nil {
@@ -286,7 +286,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 			}, nil
 		}
 		color = "W"
-		fmt.Printf("[检测] 白棋，检测到标记位置: %v\n", markerRect)
+		// fmt.Printf("[检测] 白棋，检测到标记位置: %v\n", markerRect)
 	}
 
 	debugInfo["final_status"] = "success"
@@ -300,7 +300,7 @@ func DetectLastMoveCoord(img gocv.Mat, moveNumber int) (Result, error) {
 		Debug:      debugInfo,
 	}
 
-	fmt.Printf("[检测] 完成，坐标: %d-%s%d\n", result.Move, string(rune('A'+result.X-1)), result.Y)
+	// fmt.Printf("[检测] 完成，坐标: %d-%s%d\n", result.Move, string(rune('A'+result.X-1)), result.Y)
 
 	return result, nil
 }
@@ -381,7 +381,7 @@ func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 		}
 	}
 
-	fmt.Printf("[HSV检测] 找到 %d 个轮廓，最大面积: %.2f\n", contours.Size(), maxArea)
+	// fmt.Printf("[HSV检测] 找到 %d 个轮廓，最大面积: %.2f\n", contours.Size(), maxArea)
 
 	return bestRect, maxArea > 0
 }
