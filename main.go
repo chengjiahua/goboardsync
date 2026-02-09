@@ -22,12 +22,12 @@ import (
 
 const (
 	WindowTitle   = "my_phone"
-	Interval      = 100 * time.Microsecond
+	Interval      = 1000 * time.Millisecond
 	ImageDir      = "/Users/chengjiahua/project/my-app"
 	TempImage     = "/Users/chengjiahua/project/my-app/screenshot.jpg"
 	TargetW       = 1200
 	TargetH       = 2670
-	POLL_INTERVAL = 1000 * time.Microsecond
+	POLL_INTERVAL = 1000 * time.Millisecond
 )
 
 var (
@@ -352,7 +352,7 @@ func gridToScreen(x, y int) (int, int) {
 }
 
 func tapOnPhone(gridX, gridY int) error {
-	fmt.Printf("[%s] 🎯 准备落子: gridX:%d, gridY:%d\n", time.Now().Format("15:04:05"), gridX, gridY)
+	// fmt.Printf("[%s] 🎯 准备落子: gridX:%d, gridY:%d\n", time.Now().Format("15:04:05"), gridX, gridY)
 
 	// 1. 计算棋盘落子点的屏幕坐标
 	screenX, screenY := gridToScreen(gridX, gridY)
@@ -367,7 +367,7 @@ func tapOnPhone(gridX, gridY int) error {
 	if err := cmd1.Run(); err != nil {
 		return fmt.Errorf("移动指示标失败: %v", err)
 	}
-	fmt.Printf("[%s] 📍 已移动指针到: (%d, %d)\n", time.Now().Format("15:04:05"), screenX, screenY)
+	// fmt.Printf("[%s] 📍 已移动指针到: (%d, %d)\n", time.Now().Format("15:04:05"), screenX, screenY)
 
 	// 3. 等待 300 毫秒，确保 App 反应过来了
 	time.Sleep(300 * time.Millisecond)
@@ -394,11 +394,13 @@ func tapOnPhone(gridX, gridY int) error {
 	return nil
 }
 func syncPhoneToKatrain() {
-	for {
+	ticker := time.NewTicker(Interval)
+	defer ticker.Stop()
+
+	for range ticker.C {
 		screenshotPath, err := captureWithADB()
 		if err != nil {
 			fmt.Printf("[%s] 📸 截图失败: %v\n", time.Now().Format("15:04:05"), err)
-			time.Sleep(Interval)
 			continue
 		}
 
@@ -408,7 +410,6 @@ func syncPhoneToKatrain() {
 		if err != nil {
 			fmt.Printf("[%s] ❌ 识别失败: %v\n", time.Now().Format("15:04:05"), err)
 			os.Remove(screenshotPath)
-			time.Sleep(Interval)
 			continue
 		}
 
@@ -422,6 +423,7 @@ func syncPhoneToKatrain() {
 
 		mu.Lock()
 		isNewFromPhone := result.Move > lastPhoneMove
+		// isNewFromPhone := true
 		mu.Unlock()
 
 		if isNewFromPhone {
@@ -430,7 +432,7 @@ func syncPhoneToKatrain() {
 			katrainX, katrainY := phoneGridToKatrain(result.X, result.Y)
 			hasStone, _, err := checkPosition(katrainX, katrainY)
 			if err != nil {
-				fmt.Printf("[%s] ❌ 检查位置失败: %v\n", time.Now().Format("15:04:05"), err)
+				fmt.Printf("[%s] ❌ 检查位置失败: X:%d Y:%d %v\n", time.Now().Format("15:04:05"), katrainX, katrainY, err)
 			} else if !hasStone {
 				err := makeMove(katrainX, katrainY, colorForKatrain)
 				if err != nil {
@@ -457,7 +459,6 @@ func syncPhoneToKatrain() {
 		}
 
 		os.Remove(screenshotPath)
-		time.Sleep(Interval)
 	}
 }
 
@@ -467,7 +468,10 @@ func phoneGridToKatrain(x, y int) (katrainX int, katrainY int) {
 	return
 }
 func syncKatrainToPhone() {
-	for {
+	ticker := time.NewTicker(POLL_INTERVAL)
+	defer ticker.Stop()
+	count := 0
+	for range ticker.C {
 		x, y, _, moveNumber, err := getLastMove()
 		fmt.Printf("[%s] ✅ 获取 KaTrain 最后一手: X:%d Y:%d (手数: %d)\n",
 			time.Now().Format("15:04:05"),
@@ -477,17 +481,19 @@ func syncKatrainToPhone() {
 		)
 		if err != nil {
 			fmt.Printf("[%s] ❌ 获取 KaTrain 最后一手失败: %v\n", time.Now().Format("15:04:05"), err)
-			time.Sleep(POLL_INTERVAL)
 			continue
 		}
 
 		if x == 0 && y == 0 {
-			time.Sleep(POLL_INTERVAL)
 			continue
 		}
-
+		count++
 		mu.Lock()
 		isNewFromKatrain := moveNumber > lastKatrainMove
+		if count%3 == 0 {
+			isNewFromKatrain = true
+		}
+		// isNewFromKatrain := true
 		mu.Unlock()
 
 		if isNewFromKatrain {
@@ -500,8 +506,6 @@ func syncKatrainToPhone() {
 			lastKatrainMove = moveNumber
 			mu.Unlock()
 		}
-
-		time.Sleep(POLL_INTERVAL)
 	}
 }
 
