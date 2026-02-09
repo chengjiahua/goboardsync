@@ -340,38 +340,6 @@ func boardwhite(img gocv.Mat) (image.Rectangle, int, int, error) {
 	return markerRect, gridX, gridY, nil
 }
 
-func findBoardRect(img gocv.Mat) image.Rectangle {
-	gray := gocv.NewMat()
-	defer gray.Close()
-	gocv.CvtColor(img, &gray, gocv.ColorBGRToGray)
-	gocv.GaussianBlur(gray, &gray, image.Pt(5, 5), 0, 0, gocv.BorderDefault)
-
-	edges := gocv.NewMat()
-	defer edges.Close()
-	gocv.Canny(gray, &edges, 50, 150)
-
-	contours := gocv.FindContours(edges, gocv.RetrievalExternal, gocv.ChainApproxSimple)
-	defer contours.Close()
-
-	maxArea := 0.0
-	bestRect := image.Rect(0, 0, img.Cols(), img.Rows())
-
-	for i := 0; i < contours.Size(); i++ {
-		area := gocv.ContourArea(contours.At(i))
-		rect := gocv.BoundingRect(contours.At(i))
-		ratio := float64(rect.Dx()) / float64(rect.Dy())
-		if area > maxArea && area > float64(img.Cols()*img.Cols()/4) && ratio > 0.9 && ratio < 1.1 {
-			maxArea = area
-			bestRect = rect
-		}
-	}
-
-	if maxArea == 0 {
-		w := img.Cols()
-		return image.Rect(0, (img.Rows()-w)/2, w, (img.Rows()+w)/2)
-	}
-	return bestRect
-}
 
 func findLastMoveMarker(img gocv.Mat) (image.Rectangle, bool) {
 	hsv := gocv.NewMat()
