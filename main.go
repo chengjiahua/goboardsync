@@ -22,19 +22,23 @@ import (
 
 const (
 	WindowTitle   = "my_phone"
-	Interval      = 1000 * time.Millisecond
+	Interval      = 100 * time.Millisecond
 	ImageDir      = "/Users/chengjiahua/project/my-app"
 	TempImage     = "/Users/chengjiahua/project/my-app/screenshot.jpg"
 	TargetW       = 1200
 	TargetH       = 2670
-	POLL_INTERVAL = 1000 * time.Millisecond
+	POLL_INTERVAL = 300 * time.Millisecond
 )
 
 var (
 	detector        *vision.Detector
 	KATRAIN_URL     = "http://localhost:8080"
 	lastKatrainMove int
+	lastKatrainX    int
+	lastKatrainY    int
 	lastPhoneMove   int
+	lastPhoneX      int
+	lastPhoneY      int
 	mu              sync.RWMutex
 )
 
@@ -49,6 +53,9 @@ func main() {
 	fmt.Println("   按 Ctrl+C 停止程序")
 	fmt.Println(strings.Repeat("=", 60))
 
+	// 启动前先把 katrain 的棋盘清空
+	clearKatrainBoard()
+
 	go startScrcpy()
 
 	time.Sleep(1 * time.Second)
@@ -59,7 +66,7 @@ func main() {
 	fmt.Println(strings.Repeat("=", 60))
 
 	go syncPhoneToKatrain()
-	go syncKatrainToPhone()
+	// go syncKatrainToPhone()
 
 	select {}
 }
@@ -305,6 +312,42 @@ func getLastMove() (int, int, string, int, error) {
 	return result.LastMove.Coords[0], result.LastMove.Coords[1], result.LastMove.Player, result.LastMove.MoveNumber, nil
 }
 
+func resetKatrainBoard() error {
+	url := fmt.Sprintf("%s/api/reset-board", KATRAIN_URL)
+	resp, err := http.Get(url)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+
+	var result struct {
+		Success bool   `json:"success"`
+		Error   string `json:"error"`
+	}
+
+	if err := json.Unmarshal(body, &result); err != nil {
+		return fmt.Errorf("解析响应失败: %s", string(body))
+	}
+
+	if !result.Success {
+		return fmt.Errorf("重置棋盘失败: %s", result.Error)
+	}
+
+	return nil
+}
+
+func clearKatrainBoard() {
+	fmt.Printf("[%s] 🧹 正在清空 KaTrain 棋盘...\n", time.Now().Format("15:04:05"))
+	err := resetKatrainBoard()
+	if err != nil {
+		fmt.Printf("[%s] ❌ 清空棋盘失败: %v\n", time.Now().Format("15:04:05"), err)
+	} else {
+		fmt.Printf("[%s] ✅ KaTrain 棋盘已清空\n", time.Now().Format("15:04:05"))
+	}
+}
+
 // func gridToScreen(gridX, gridY int) (int, int) {
 // 	boardLeft := 40
 // 	boardTop := 536
@@ -422,8 +465,7 @@ func syncPhoneToKatrain() {
 		)
 
 		mu.Lock()
-		isNewFromPhone := result.Move > lastPhoneMove
-		// isNewFromPhone := true
+		isNewFromPhone := (result.X != lastPhoneX || result.Y != lastPhoneY)
 		mu.Unlock()
 
 		if isNewFromPhone {
@@ -455,6 +497,8 @@ func syncPhoneToKatrain() {
 
 			mu.Lock()
 			lastPhoneMove = result.Move
+			lastPhoneX = result.X
+			lastPhoneY = result.Y
 			mu.Unlock()
 		}
 
@@ -470,7 +514,7 @@ func phoneGridToKatrain(x, y int) (katrainX int, katrainY int) {
 func syncKatrainToPhone() {
 	ticker := time.NewTicker(POLL_INTERVAL)
 	defer ticker.Stop()
-	count := 0
+
 	for range ticker.C {
 		x, y, _, moveNumber, err := getLastMove()
 		fmt.Printf("[%s] ✅ 获取 KaTrain 最后一手: X:%d Y:%d (手数: %d)\n",
@@ -484,16 +528,12 @@ func syncKatrainToPhone() {
 			continue
 		}
 
-		if x == 0 && y == 0 {
+		if moveNumber == 0 {
 			continue
 		}
-		count++
+
 		mu.Lock()
-		isNewFromKatrain := moveNumber > lastKatrainMove
-		if count%3 == 0 {
-			isNewFromKatrain = true
-		}
-		// isNewFromKatrain := true
+		isNewFromKatrain := (x != lastKatrainX || y != lastKatrainY)
 		mu.Unlock()
 
 		if isNewFromKatrain {
@@ -504,6 +544,8 @@ func syncKatrainToPhone() {
 
 			mu.Lock()
 			lastKatrainMove = moveNumber
+			lastKatrainX = x
+			lastKatrainY = y
 			mu.Unlock()
 		}
 	}
