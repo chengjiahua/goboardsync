@@ -14,7 +14,7 @@ import (
 	"sync"
 	"time"
 
-	"my-app/vision"
+	"goboardsync/vision"
 
 	"github.com/nfnt/resize"
 	"gocv.io/x/gocv"
@@ -66,7 +66,7 @@ func main() {
 	fmt.Println(strings.Repeat("=", 60))
 
 	go syncPhoneToKatrain()
-	// go syncKatrainToPhone()
+	go syncKatrainToPhone()
 
 	select {}
 }
