@@ -4,6 +4,10 @@
 - 让你能够在与人对战时，随时求助 AI 最犀利的招法。让你达到顶尖职业水准。网棋无敌的存在。
 - 所有代码全部由 AI 生成，TRAE 国内版免费的 AI
 
+
+## 成果展示
+[围棋 AI 实时辅助系统](https://www.bilibili.com/video/BV12KFQzgE55/?spm_id_from=333.337.search-card.all.click&vd_source=45b06c6dfbe6870bef033507ca658ba0)
+
 ## 功能特性
 
 - **📱 手机 → KaTrain 同步**：通过 scrcpy 实时获取手机屏幕，识别最后一手位置，自动同步到 KaTrain
@@ -30,8 +34,6 @@
                               │   手机设备   │
                               └─────────────┘
 ```
-
-## 成果展示
 
 
 
