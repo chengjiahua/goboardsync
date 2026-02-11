@@ -9,7 +9,7 @@
 
 ## 成果展示
 <a href="https://www.bilibili.com/video/BV12KFQzgE55/">
-  <img src="https://socialify.git.ci/your-github-username/your-repo-name/image?font=Inter&language=1&name=1&owner=1&pattern=Circuit%20Board&theme=Light" alt="演示视频" width="600" />
+  <img src="https://socialify.git.ci/your-github-username/your-repo-name/image?font=Inter&language=1&name=1&owner=1&pattern=Circuit%20Board&theme=Light" alt="围棋 AI 实时辅助工具" width="600" />
 </a>
 
 ## 功能特性
