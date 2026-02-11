@@ -1,16 +1,12 @@
 # Go Game Sync - 手机与 KaTrain 双向同步工具
 
-**版本：v1.0.0**
-
 - 手机围棋棋盘与 KaTrain AI 之间的双向同步工具，自动识别落子位置并同步到 KaTrain。
 - 让你能够在与人对战时，随时求助 AI 最犀利的招法。让你达到顶尖职业水准。网棋无敌的存在。
 - 所有代码全部由 AI 生成，TRAE 国内版免费的 AI
 
 
 ## 成果展示
-<a href="https://www.bilibili.com/video/BV12KFQzgE55/">
-  <img src="https://socialify.git.ci/your-github-username/your-repo-name/image?font=Inter&language=1&name=1&owner=1&pattern=Circuit%20Board&theme=Light" alt="围棋 AI 实时辅助工具" width="600" />
-</a>
+[围棋 AI 实时辅助系统](https://www.bilibili.com/video/BV12KFQzgE55/?spm_id_from=333.337.search-card.all.click&vd_source=45b06c6dfbe6870bef033507ca658ba0)
 
 ## 功能特性
 
